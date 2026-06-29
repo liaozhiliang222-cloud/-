@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node scripts/serve.mjs",
     "preview": "node scripts/serve.mjs",
-    "build": "echo 'Static site - no build needed'"
+    "build": "node scripts/build.mjs"
   },
   "dependencies": {},
   "devDependencies": {}
