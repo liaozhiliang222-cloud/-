@@ -1,8 +1,8 @@
 const MODEL_CONFIG = {
-  kimi: { name: "Kimi", key: "synthuser_api_key_kimi", placeholder: "sk-...", model: "moonshot-v1-8k" },
-  deepseek: { name: "DeepSeek", key: "synthuser_api_key_deepseek", placeholder: "sk-...", model: "deepseek-chat" },
-  zhipu: { name: "智谱 GLM", key: "synthuser_api_key_zhipu", placeholder: "请输入 GLM API Key", model: "glm-4" },
-  custom: { name: "自定义模型", key: "synthuser_api_key_custom", placeholder: "兼容 OpenAI 格式的 API Key", model: "your-model-name" }
+  kimi: { name: "Kimi", key: "synthuser_api_key_kimi", placeholder: "sk-...", model: "moonshot-v1-8k", baseUrl: "https://api.moonshot.cn/v1/chat/completions" },
+  deepseek: { name: "DeepSeek", key: "synthuser_api_key_deepseek", placeholder: "sk-...", model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1/chat/completions" },
+  zhipu: { name: "智谱 GLM", key: "synthuser_api_key_zhipu", placeholder: "请输入 GLM API Key", model: "glm-4", baseUrl: "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
+  custom: { name: "自定义模型", key: "synthuser_api_key_custom", placeholder: "兼容 OpenAI 格式的 API Key", model: "your-model-name", baseUrl: "" }
 };
 
 const templates = [
@@ -52,13 +52,15 @@ const state = {
   sampleSize: 100,
   isGenerating: false,
   progress: 0,
+  generateStatus: "",
   result: null,
   showApiPrompt: false,
   deferredInstallPrompt: null,
   installAvailable: false,
   isStandalone: window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true,
   isOnline: navigator.onLine,
-  toast: ""
+  toast: "",
+  abortController: null
 };
 
 const initialMode = new URLSearchParams(window.location.search).get("mode");
@@ -75,6 +77,18 @@ function getSavedKey(provider = state.provider) {
 
 function hasModelReady() {
   return Boolean(getSavedKey());
+}
+
+function getApiConfig() {
+  const cfg = MODEL_CONFIG[state.provider];
+  const key = getSavedKey();
+  let baseUrl = cfg.baseUrl;
+  let model = cfg.model;
+  if (state.provider === "custom") {
+    baseUrl = state.customBaseUrl.trim();
+    model = state.customModel.trim() || "custom-model";
+  }
+  return { baseUrl, model, key };
 }
 
 function route(page) {
@@ -199,35 +213,214 @@ function importOutline() {
   render();
 }
 
-function importQuestionnaire() {
-  syncResearchForm();
-  const lines = state.questionnaireText.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-  const parsed = lines.map(parseQuestionLine).filter(Boolean);
-  if (parsed.length >= 3) {
-    state.quantQuestions = parsed.slice(0, 8);
-    state.quantInputMode = "manual";
-    toast("已识别问卷题目");
-  } else {
-    toast("至少需要识别 3 道题");
+// ===== AI 调用相关函数 =====
+
+function buildQualPrompt() {
+  const c = state.audienceConfig;
+  const questions = state.qualQuestions.map((q, i) => `${i + 1}. ${q}`).join("\n");
+  return `你是一位资深消费者研究顾问，擅长用定性访谈方法挖掘用户洞察。请为以下研究设计生成6位虚拟访谈对象的详细笔录。
+
+## 研究主题
+${state.topic}
+
+## 目标人群画像
+- 年龄：${c.age}
+- 性别比例：${c.gender}
+- 城市层级：${c.city}
+- 收入/消费力：${c.income}
+- 品类行为：${c.usage}
+- 价格敏感度：${c.price}
+- 心理/生活方式标签：${c.lifestyle}
+
+## 访谈问题
+${questions}
+
+## 生成要求
+1. 生成6位差异化明显的虚拟访谈对象，每位对象有独特的人口统计特征、消费态度和行为模式。
+2. 为每位对象设定：姓名（中文真实姓名，避免重复）、年龄、所在城市、一句话角色标签（如"价格敏感但愿意尝鲜"）、整体态度倾向（谨慎正向/中性观望/积极尝试/消极拒绝）。
+3. 每位对象对每道问题给出详细、有深度的回答，回答要口语化、具体、有细节，避免空洞套话。回答应反映该对象的独特视角和真实顾虑。
+4. 回答长度适中，每道问题回答约80-150字。
+5. 6位对象之间要有明显差异，覆盖不同态度光谱：从非常积极到非常消极，从实用主义到情感驱动。
+
+## 输出格式
+请严格按以下JSON格式输出（不要包含markdown代码块标记，直接输出JSON）：
+
+{
+  "users": [
+    {
+      "name": "姓名",
+      "age": 28,
+      "city": "城市",
+      "avatar": "性别简称（男/女）",
+      "role": "一句话角色标签",
+      "sentiment": "态度倾向",
+      "persona": "简短画像描述",
+      "answers": [
+        {"question": "问题1原文", "answer": "详细回答..."},
+        {"question": "问题2原文", "answer": "详细回答..."}
+      ]
+    }
+  ],
+  "analysis": {
+    "summary": "200字以内的核心结论，概括整体态度分布和关键洞察",
+    "themes": [
+      {"name": "主题1名称", "value": 75, "detail": "该主题的具体说明和出现频率"}
+    ],
+    "recommendations": ["行动建议1", "行动建议2", "行动建议3"]
   }
-  render();
 }
 
-function parseQuestionLine(line) {
-  const clean = line.replace(/^Q?\d+[.、\s]*/i, "").trim();
-  if (!clean) return null;
-  const bracket = clean.match(/【([^】]+)】/);
-  const label = bracket ? bracket[1] : "";
-  const text = clean.replace(/【[^】]+】/, "").split(/[:：]/)[0].trim();
-  const tail = clean.includes("】") ? clean.split("】").slice(1).join("】") : clean.split(/[:：]/).slice(1).join(" ");
-  const options = tail.replace(/[;；]/g, "/").split(/[\/|｜]/).map((item) => item.trim()).filter(Boolean).join(", ");
-  if (/矩阵/.test(label)) return { text, type: "matrix", options: /10/.test(label) ? "1, 2, 3, 4, 5, 6, 7, 8, 9, 10" : "1, 2, 3, 4, 5", scale: /10/.test(label) ? "1-10" : "1-5", rows: options || "指标A, 指标B, 指标C" };
-  if (/多选/.test(label)) return { text, type: "multiple", options: options || "选项A, 选项B, 选项C", scale: "1-5", rows: "" };
-  if (/量表|打分|评分|10分/.test(label)) return { text, type: "scale", options: "", scale: /10/.test(label) ? "1-10" : /7/.test(label) ? "1-7" : "1-5", rows: "" };
-  return { text, type: "single", options: options || "选项A, 选项B, 选项C, 选项D", scale: "1-5", rows: "" };
+analysis.themes 需要3-5个主题聚类，每个主题给出百分比和详细说明。analysis.recommendations 需要3-5条具体、可操作的建议。`;
 }
 
-function startGeneration() {
+function buildQuantPrompt() {
+  const c = state.audienceConfig;
+  const questions = state.quantQuestions.map((q, i) => {
+    let detail = "";
+    if (q.type === "single") detail = `【单选】选项：${q.options}`;
+    else if (q.type === "multiple") detail = `【多选】选项：${q.options}`;
+    else if (q.type === "scale") detail = `【量表】${q.scale}分制`;
+    else if (q.type === "matrix") detail = `【矩阵打分】${q.scale}分制，评价维度：${q.rows}`;
+    return `${i + 1}. ${q.text} ${detail}`;
+  }).join("\n");
+
+  return `你是一位资深市场研究数据分析师，擅长用定量数据模拟消费者行为。请为以下研究设计生成合理的问卷统计结果。
+
+## 研究主题
+${state.topic}
+
+## 目标人群画像
+- 年龄：${c.age}
+- 性别比例：${c.gender}
+- 城市层级：${c.city}
+- 收入/消费力：${c.income}
+- 品类行为：${c.usage}
+- 价格敏感度：${c.price}
+- 心理/生活方式标签：${c.lifestyle}
+
+## 模拟样本量
+N = ${state.sampleSize}
+
+## 问卷结构
+${questions}
+
+## 生成要求
+1. 为每道题目生成合理的统计分布，数据应反映目标人群的真实消费行为和态度倾向。
+2. 数据要有内在一致性，不同题目之间应有逻辑关联（例如：重视健康的人购买意愿更高）。
+3. 单选题：各选项百分比之和为100%，分布要合理（不要全部平均分配）。
+4. 多选题：各选项百分比可超过100%，反映选择该选项的人数比例。
+5. 量表题：给出每个分值的频数分布（总和=100%），计算均值和标准差。均值应合理反映整体态度（如偏积极则均值>3）。
+6. 矩阵题：给出每个评价维度的均值和分布。维度之间应有差异（如"口味"通常比"包装"得分高）。
+7. 分析摘要要包含：
+   - 一段200字以内的总结
+   - 3-5条关键发现（每条具体、有洞察）
+   - 2-3组交叉分析（例如"高健康重视度 vs 购买意愿"）
+
+## 输出格式
+请严格按以下JSON格式输出（不要包含markdown代码块标记，直接输出JSON）：
+
+{
+  "questions": [
+    {
+      "text": "题目原文",
+      "type": "single|multiple|scale|matrix",
+      "optionsArray": ["选项A", "选项B"],
+      "values": [42, 31, 17, 10]
+    }
+  ],
+  "analysis": {
+    "summary": "分析摘要",
+    "findings": ["关键发现1", "关键发现2"],
+    "crosstab": [
+      ["维度A", "维度B描述", "百分比"]
+    ]
+  }
+}
+
+注意：
+- single/multiple 类型的 optionsArray 是选项列表，values 是对应百分比
+- scale 类型的 optionsArray 为空，distribution 为各分值频数（见下方），mean 为均值，sd 为标准差
+- matrix 类型的 matrix 字段为数组，每个元素有 row（维度名）、mean（均值）、distribution（分布）
+
+请为每道题输出完整的数据结构。`;
+}
+
+async function callAI(prompt, onProgress) {
+  const { baseUrl, model, key } = getApiConfig();
+  if (!key) throw new Error("未设置 API Key");
+  if (!baseUrl) throw new Error("未设置 API 地址");
+
+  state.abortController = new AbortController();
+
+  const response = await fetch(baseUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: model,
+      messages: [
+        { role: "system", content: "你是一位专业的市场研究专家，擅长消费者行为分析。请严格按照用户要求的格式输出，只输出JSON，不要输出任何其他解释文字。" },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.8,
+      max_tokens: 4000,
+      stream: true
+    }),
+    signal: state.abortController.signal
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`API 错误 ${response.status}: ${errorText}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let fullContent = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data: ")) continue;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") continue;
+      try {
+        const parsed = JSON.parse(data);
+        const delta = parsed.choices?.[0]?.delta?.content || "";
+        if (delta) {
+          fullContent += delta;
+          if (onProgress) onProgress(delta, fullContent);
+        }
+      } catch (e) {
+        // 忽略解析错误
+      }
+    }
+  }
+
+  return fullContent;
+}
+
+function extractJSON(text) {
+  // 尝试从文本中提取 JSON
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    return text.slice(start, end + 1);
+  }
+  return text;
+}
+
+async function startGeneration() {
   syncResearchForm();
   if (!hasModelReady()) {
     state.showApiPrompt = true;
@@ -238,118 +431,141 @@ function startGeneration() {
     toast("请补全研究内容");
     return;
   }
+
   state.page = "result";
   state.isGenerating = true;
   state.progress = 1;
+  state.generateStatus = "正在连接 AI...";
   state.result = null;
   state.resultTab = "primary";
   render();
 
-  const total = state.mode === "qual" ? 6 : Math.max(5, state.quantQuestions.length + 2);
-  const timer = window.setInterval(() => {
-    state.progress += 1;
-    if (state.progress > total) {
-      window.clearInterval(timer);
-      state.isGenerating = false;
-      state.result = state.mode === "qual" ? makeQualResult() : makeQuantResult();
+  try {
+    const prompt = state.mode === "qual" ? buildQualPrompt() : buildQuantPrompt();
+    const total = state.mode === "qual" ? 6 : Math.max(5, state.quantQuestions.length + 2);
+
+    let fullContent = "";
+    let progressTimer = null;
+
+    // 进度条动画
+    progressTimer = window.setInterval(() => {
+      if (state.progress < total) {
+        state.progress += 1;
+        render();
+      }
+    }, 800);
+
+    // 更新状态文字
+    const statusTimer = window.setInterval(() => {
+      if (state.mode === "qual") {
+        if (state.progress <= 2) state.generateStatus = "正在构建虚拟用户画像...";
+        else if (state.progress <= 4) state.generateStatus = `正在生成第 ${state.progress - 2} 位访谈对象的笔录...`;
+        else state.generateStatus = "正在归纳分析主题...";
+      } else {
+        if (state.progress <= 2) state.generateStatus = "正在模拟样本分布...";
+        else if (state.progress <= 4) state.generateStatus = "正在生成统计结果...";
+        else state.generateStatus = "正在撰写分析摘要...";
+      }
+      render();
+    }, 1500);
+
+    fullContent = await callAI(prompt, (delta, content) => {
+      // 流式更新状态（可选）
+    });
+
+    window.clearInterval(progressTimer);
+    window.clearInterval(statusTimer);
+
+    // 解析 JSON
+    const jsonText = extractJSON(fullContent);
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (e) {
+      console.error("JSON 解析失败，原始内容:", fullContent);
+      throw new Error("AI 返回格式不正确，请重试。原始内容已输出到控制台。");
     }
+
+    // 验证数据结构
+    if (state.mode === "qual") {
+      if (!parsed.users || !Array.isArray(parsed.users) || parsed.users.length === 0) {
+        throw new Error("AI 返回的数据缺少 users 字段");
+      }
+      // 确保每个 user 有 answers 数组
+      parsed.users.forEach((u, i) => {
+        if (!u.answers || !Array.isArray(u.answers)) {
+          u.answers = state.qualQuestions.map((q) => ({ question: q, answer: "（AI 生成中断，未返回完整回答）" }));
+        }
+        if (!u.avatar) u.avatar = u.sentiment?.includes("女") ? "女" : "男";
+        if (!u.persona) u.persona = `${state.audienceConfig.age}，${state.audienceConfig.city}，${state.audienceConfig.lifestyle}`;
+      });
+      if (!parsed.analysis) {
+        parsed.analysis = {
+          summary: "AI 生成分析摘要时中断，请重新生成。",
+          themes: [{ name: "数据不完整", value: 0, detail: "请重新生成以获取完整分析" }],
+          recommendations: ["请重新点击生成按钮以获取完整分析结果"]
+        };
+      }
+    } else {
+      if (!parsed.questions || !Array.isArray(parsed.questions) || parsed.questions.length === 0) {
+        throw new Error("AI 返回的数据缺少 questions 字段");
+      }
+      // 确保每个 question 有正确的数据结构
+      parsed.questions.forEach((q, i) => {
+        if (!q.optionsArray) {
+          if (q.type === "single" || q.type === "multiple") {
+            const opts = state.quantQuestions[i]?.options?.split(/[,，、]/) || ["选项A", "选项B"];
+            q.optionsArray = opts.map((o) => o.trim()).filter(Boolean);
+          } else {
+            q.optionsArray = [];
+          }
+        }
+        if (!q.values && q.type !== "scale" && q.type !== "matrix") {
+          q.values = q.optionsArray.map(() => Math.round(100 / q.optionsArray.length));
+        }
+        if (q.type === "scale" && !q.distribution) {
+          const scaleMax = parseInt(q.scale?.split("-")[1] || "5");
+          q.distribution = Array.from({ length: scaleMax }, (_, i) => Math.round(100 / scaleMax));
+          if (!q.mean) q.mean = (scaleMax + 1) / 2;
+          if (!q.sd) q.sd = "1.0";
+        }
+        if (q.type === "matrix" && !q.matrix) {
+          const rows = state.quantQuestions[i]?.rows?.split(/[,，、]/) || ["维度A"];
+          q.matrix = rows.map((r) => ({ row: r.trim(), mean: "3.0", distribution: [20, 20, 20, 20, 20] }));
+        }
+      });
+      if (!parsed.analysis) {
+        parsed.analysis = {
+          summary: "AI 生成分析摘要时中断，请重新生成。",
+          findings: ["请重新生成以获取完整分析"],
+          crosstab: [["数据", "不完整", "请重试"]]
+        };
+      }
+    }
+
+    state.result = parsed;
+    state.isGenerating = false;
+    state.progress = total;
+    state.generateStatus = "";
+    toast("生成完成");
     render();
-  }, 420);
-}
 
-function makeQualResult() {
-  const names = ["林晓婧", "王建国", "陈雨桐", "周敏", "赵一鸣", "刘可"];
-  const cities = ["上海", "成都", "杭州", "广州", "北京", "武汉"];
-  const roles = ["价格敏感但愿意尝鲜", "重视成分和安全感", "看重社交分享属性", "偏理性，会比较替代品", "追求效率和便利", "注重品牌可信度"];
-  const avatars = ["女", "男", "研", "数", "策", "品"];
-  const users = names.map((name, index) => ({
-    avatar: avatars[index],
-    name,
-    age: 24 + index * 4,
-    city: cities[index],
-    role: roles[index],
-    persona: `${state.audienceConfig.age}，${state.audienceConfig.city}，${state.audienceConfig.lifestyle}`,
-    sentiment: index % 3 === 0 ? "谨慎正向" : index % 3 === 1 ? "中性观望" : "积极尝试",
-    answers: state.qualQuestions.map((question, qIndex) => ({
-      question,
-      answer: [
-        `第一感觉是有记忆点，但我会先看它和现有选择到底差在哪里。${state.topic} 如果能把核心卖点和使用场景说清楚，我愿意进一步了解。`,
-        "我更可能在明确需求出现时尝试，比如办公室囤货、朋友聚会或看到身边人推荐。价格不要太跳，首购门槛低会更容易下单。",
-        "最大的顾虑是宣传和真实体验不一致。成分、口味、售后评价这些细节，会直接影响我是不是把它当成长期选择。"
-      ][qIndex] || "这个问题我会结合自己的真实使用场景来判断，关键是要看到可信的证据和清晰的收益。"
-    }))
-  }));
-  return {
-    users,
-    analysis: {
-      summary: `围绕“${audienceSummary()}”生成的合成人群整体态度偏谨慎正向。用户愿意尝试，但前提是概念表达具体、价格门槛可接受，并且能通过成分、评价或场景证明降低不确定感。`,
-      themes: [
-        { name: "尝鲜动机", value: 42, detail: "被健康、便利、新口味吸引，但不会盲目复购。" },
-        { name: "价格顾虑", value: 33, detail: "用户希望首购低门槛，长期价格不能显著高于替代品。" },
-        { name: "信任证据", value: 25, detail: "成分、真实评价、品牌背书是转化关键。" }
-      ],
-      recommendations: [
-        "首屏卖点应聚焦一个强场景，而不是堆叠多个功效。",
-        "建议提供低门槛试饮装或组合装，降低首次尝试成本。",
-        "后续真实调研应重点验证价格带和复购驱动因素。"
-      ]
+  } catch (error) {
+    if (error.name === "AbortError") {
+      state.isGenerating = false;
+      state.progress = 0;
+      state.generateStatus = "";
+      toast("已取消生成");
+      render();
+      return;
     }
-  };
-}
-
-function makeQuantResult() {
-  const questions = state.quantQuestions.map((question, index) => {
-    if (question.type === "scale") {
-      const distribution = question.scale === "1-10" ? [2, 3, 5, 8, 12, 16, 20, 18, 10, 6] : question.scale === "1-7" ? [4, 8, 13, 24, 27, 16, 8] : [8, 15, 25, 35, 17];
-      const mean = distribution.reduce((sum, count, i) => sum + count * (i + 1), 0) / 100;
-      return { ...question, index, distribution, mean: mean.toFixed(1), sd: question.scale === "1-7" ? "1.4" : "0.9" };
-    }
-    if (question.type === "matrix") {
-      const rows = splitList(question.rows);
-      return {
-        ...question,
-        index,
-        matrix: rows.map((row, rowIndex) => ({
-          row,
-          mean: (3.4 + rowIndex * 0.25).toFixed(1),
-          distribution: [6 + rowIndex, 12, 24, 36 - rowIndex, 22]
-        }))
-      };
-    }
-    const opts = splitList(question.options);
-    const base = question.type === "multiple" ? [58, 46, 34, 28, 16] : [42, 31, 17, 10, 6];
-    const values = base.slice(0, opts.length);
-    const normalized = question.type === "single" ? normalizeTo100(values) : values;
-    return { ...question, index, optionsArray: opts, values: normalized };
-  });
-  return {
-    questions,
-    analysis: {
-      summary: `当前模拟样本 N=${state.sampleSize}，合成人群为“${audienceSummary()}”。结果显示购买意向和健康重视度存在正向关系，多场景触发比单一卖点更适合进入正式问卷验证。`,
-      exports: ["原始样本 CSV", "统计汇总 CSV", "分析摘要 Markdown"],
-      findings: [
-        "购买意向集中在“可能会”，说明概念具备探索价值但仍需强化转化理由。",
-        "矩阵题显示口味和成分权重最高，价格是明显的二级影响因素。",
-        "建议正式投放前增加城市层级或使用频率交叉分析。"
-      ],
-      crosstab: [
-        ["健康重视高", "一定会/可能会", "68%"],
-        ["健康重视中", "一定会/可能会", "47%"],
-        ["健康重视低", "一定会/可能会", "29%"]
-      ]
-    }
-  };
-}
-
-function splitList(value) {
-  return value.split(/[,，、\n]/).map((item) => item.trim()).filter(Boolean);
-}
-
-function normalizeTo100(values) {
-  const total = values.reduce((sum, value) => sum + value, 0);
-  const mapped = values.map((value) => Math.round((value / total) * 100));
-  mapped[mapped.length - 1] = 100 - mapped.slice(0, -1).reduce((sum, value) => sum + value, 0);
-  return mapped;
+    console.error("生成失败:", error);
+    state.isGenerating = false;
+    state.progress = 0;
+    state.generateStatus = "";
+    toast(`生成失败: ${error.message}`);
+    render();
+  }
 }
 
 function copyResult() {
@@ -365,6 +581,7 @@ function copyAnalysis() {
 }
 
 function qualMarkdown() {
+  if (!state.result) return "";
   return `# ${state.topic} - 虚拟座谈会笔录\n\n## 用户画像：${state.audience}\n\n` + state.result.users.map((user, i) => {
     const answers = user.answers.map((item, idx) => `**Q${idx + 1}: ${item.question}**\n${item.answer}`).join("\n\n");
     return `### 用户 ${i + 1}：${user.name}（${user.age} 岁，${user.city}）\n**标签**：${user.role}\n**态度**：${user.sentiment}\n\n${answers}`;
@@ -372,11 +589,13 @@ function qualMarkdown() {
 }
 
 function qualAnalysisMarkdown() {
+  if (!state.result) return "";
   const a = state.result.analysis;
   return `# ${state.topic} - 归纳分析\n\n## 核心结论\n${a.summary}\n\n## 主题聚类\n${a.themes.map((t) => `- ${t.name}（${t.value}%）：${t.detail}`).join("\n")}\n\n## 行动建议\n${a.recommendations.map((r) => `- ${r}`).join("\n")}`;
 }
 
 function quantCsv() {
+  if (!state.result) return "";
   const rows = ["题目,类型,选项/指标,频数或均值,百分比/分布"];
   state.result.questions.forEach((question) => {
     if (question.type === "scale") {
@@ -391,6 +610,7 @@ function quantCsv() {
 }
 
 function quantAnalysisMarkdown() {
+  if (!state.result) return "";
   const a = state.result.analysis;
   return `# ${state.topic} - 问卷模拟分析\n\n${a.summary}\n\n## 关键发现\n${a.findings.map((f) => `- ${f}`).join("\n")}\n\n## 交叉表预览\n${a.crosstab.map((row) => `- ${row[0]} / ${row[1]}：${row[2]}`).join("\n")}\n\n> 合成数据用于研究设计与假设预验证，不替代真实样本统计推断。`;
 }
@@ -448,9 +668,9 @@ function QualPage() {
         ${WorkflowSteps(["研究设计", "生成笔录", "归纳分析"])}
         <div>
           <div class="headline">
-            <span class="eyebrow">虚拟座谈会</span>
+            <span class="eyebrow">AI 合成座谈会</span>
             <h1>定性研究：从问题到笔录，再到归纳分析</h1>
-            <p>当前版本支持手动问题设计。生成后进入结果页查看访谈笔录、主题聚类和行动建议。</p>
+            <p>配置研究主题和人群画像，AI 会生成差异化的虚拟访谈对象和深度回答。生成后查看笔录和主题聚类。</p>
           </div>
           ${TemplatePanel()}
           <section class="panel">
@@ -478,16 +698,16 @@ function QuantPage() {
         ${WorkflowSteps(["问卷设计", "题型配置", "模拟统计", "分析摘要"])}
         <div>
           <div class="headline">
-            <span class="eyebrow">问卷模拟器</span>
-            <h1>定量研究：支持多题型模拟和分析摘要</h1>
-            <p>支持手动配置单选、多选、量表和矩阵打分。生成后进入结果页查看统计结果和分析摘要。</p>
+            <span class="eyebrow">AI 问卷模拟器</span>
+            <h1>定量研究：支持多题型模拟和分析导出</h1>
+            <p>AI 会根据人群画像和研究主题生成合理的统计分布。支持单选、多选、量表和矩阵打分的模拟统计。</p>
           </div>
           ${TemplatePanel()}
           <section class="panel">
             <div class="section-title">
               <div>
                 <h2>问卷结构</h2>
-                <p>当前原型模拟 N=${state.sampleSize}，后续可扩展到配额矩阵和真实小样本校准。</p>
+                <p>AI 模拟样本 N=${state.sampleSize}，生成结果反映目标人群的消费行为和态度倾向。</p>
               </div>
             </div>
             <div class="field compact-field">
@@ -547,7 +767,7 @@ function AudienceBuilder() {
       <div class="section-title compact-title">
         <div>
           <h2>合成人群设定</h2>
-          <p>先用轻量画像设定控制生成口径，后续可扩展为配额矩阵和 Excel 导入。</p>
+          <p>先用轻量画像设定控制生成口径，AI 会根据这些特征生成差异化的虚拟对象。</p>
         </div>
       </div>
       <div class="segmented">
@@ -567,7 +787,7 @@ function AudienceBuilder() {
       </div>
       <div class="quota-preview">
         <span>预览</span>
-        <strong>${state.mode === "qual" ? "6 位访谈对象" : `${state.sampleSize} 份模拟样本`}</strong>
+        <strong>${state.mode === "qual" ? "6 位 AI 合成访谈对象" : `${state.sampleSize} 份 AI 模拟样本`}</strong>
         <p>${escapeHtml(audienceSummary())}</p>
       </div>
     </div>
@@ -603,7 +823,7 @@ function QualQuestionForm() {
       <div class="analysis-options">
         ${["核心发现", "态度聚类", "痛点顾虑", "行动建议"].map((item) => `<span>${item}</span>`).join("")}
       </div>
-      <div class="notice">生成后会同时输出访谈笔录和归纳分析，便于直接进入报告撰写。</div>
+      <div class="notice">AI 会同时输出访谈笔录和归纳分析，便于直接进入报告撰写。</div>
     </div>
   `;
 }
@@ -628,7 +848,7 @@ function QuantQuestionForm() {
         </div>
       `).join("")}
       <button class="ghost" data-action="add-question" ${state.quantQuestions.length >= 8 ? "disabled" : ""}>添加题目</button>
-      <div class="notice">合成数据用于研究设计与假设预验证，不替代真实样本统计推断。</div>
+      <div class="notice">AI 会根据人群画像生成合理的统计分布，用于研究设计与假设预验证。</div>
     </div>
   `;
 }
@@ -685,7 +905,7 @@ function SettingsPage() {
       <div class="headline">
         <span class="eyebrow">模型设置</span>
         <h1>把模型和 Key 独立管理</h1>
-        <p>研究任务和模型配置分开，为后续多模型对比、内置额度和本地 Keychain 存储预留位置。</p>
+        <p>研究任务和模型配置分开，API Key 仅保存在本地浏览器。</p>
       </div>
       <div class="settings-layout">
         <section class="panel">
@@ -701,7 +921,7 @@ function SettingsPage() {
         </section>
         <section class="panel">
           <div class="section-title">
-            <div><h2>${config.name}</h2><p>Key 只保存在本地浏览器。桌面版可迁移到系统 Keychain。</p></div>
+            <div><h2>${config.name}</h2><p>Key 只保存在本地浏览器。不设置 API Key 则无法生成真实结果。</p></div>
             <span class="status-pill">${getSavedKey() ? "已保存" : "待设置"}</span>
           </div>
           <div class="form-grid">
@@ -744,7 +964,8 @@ function LoadingResult() {
     <section class="container loading">
       <div>
         <div class="pulse"><span></span><span></span><span></span></div>
-        <h1>${state.mode === "qual" ? "正在生成访谈笔录..." : "正在生成问卷模拟结果..."}</h1>
+        <h1>${state.mode === "qual" ? "正在生成 AI 访谈笔录..." : "正在生成 AI 问卷模拟结果..."}</h1>
+        <p class="audience">${state.generateStatus || "正在连接 AI..."}</p>
         <p class="audience">进度 ${Math.min(state.progress, total)}/${total}</p>
         <div class="actions" style="justify-content:center"><button class="ghost" data-action="cancel-generation">取消生成</button></div>
       </div>
@@ -775,9 +996,9 @@ function QualResultPage() {
   return `
     <section class="container">
       <div class="headline">
-        <span class="eyebrow">定性研究结果</span>
+        <span class="eyebrow">AI 定性研究结果</span>
         <h1>${escapeHtml(state.topic)}</h1>
-        <p>生成结果页独立展示，顶部导航仍只保留常驻模块。</p>
+        <p>以下笔录和分析由 AI 根据你设定的人群画像和研究问题实时生成。</p>
       </div>
       ${ResultTabs()}
       ${state.resultTab === "primary" ? QualTranscripts() : ""}
@@ -790,9 +1011,9 @@ function QuantResultPage() {
   return `
     <section class="container">
       <div class="headline">
-        <span class="eyebrow">定量研究结果</span>
+        <span class="eyebrow">AI 定量研究结果</span>
         <h1>${escapeHtml(state.topic)}</h1>
-        <p>支持单选、多选、量表、矩阵打分的模拟统计与分析导出。</p>
+        <p>以下统计数据和分析由 AI 根据你设定的人群画像生成。</p>
       </div>
       ${ResultTabs()}
       ${state.resultTab === "primary" ? QuantStats() : ""}
@@ -875,7 +1096,7 @@ function QuantAnalysis() {
       </div>
       <h2>关键发现</h2>
       <ul class="insight-list">${a.findings.map((item) => `<li>${item}</li>`).join("")}</ul>
-      <div class="notice">合成数据用于研究设计与假设预验证，不替代真实样本统计推断。</div>
+      <div class="notice">合成数据由 AI 根据人群画像生成，用于研究设计与假设预验证，不替代真实样本统计推断。</div>
     </section>
   `;
 }
@@ -962,8 +1183,12 @@ function bindEvents() {
     if (action === "copy-analysis") copyAnalysis();
     if (action === "regenerate") startGeneration();
     if (action === "cancel-generation") {
+      if (state.abortController) {
+        state.abortController.abort();
+      }
       state.isGenerating = false;
       state.progress = 0;
+      state.generateStatus = "";
       route(state.mode);
     }
   });
