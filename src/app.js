@@ -6,11 +6,91 @@ const MODEL_CONFIG = {
 };
 
 const templates = [
-  ["0 糖气泡水概念测试", "年轻白领", ["口味", "价格", "健康", "场景"]],
-  ["新能源汽车购买决策因素", "一线城市潜在购车者", ["续航", "价格", "品牌", "充电"]],
-  ["海外用户对短视频电商的接受度", "北美 / 欧洲 / 日韩用户", ["跨境电商", "短视频", "消费习惯"]],
-  ["小红书用户社交需求探索", "小红书活跃用户", ["内容偏好", "互动", "社区氛围"]],
-  ["母婴用品选购痛点", "0-3 岁宝宝妈妈", ["安全", "价格", "品牌", "渠道"]]
+  {
+    topic: "0 糖气泡水概念测试",
+    audience: "年轻白领",
+    tags: ["口味", "价格", "健康", "场景"],
+    qualQuestions: [
+      "你对 0 糖气泡水的第一印象是什么？",
+      "什么场景下你最可能选择购买 0 糖气泡水？",
+      "0 糖气泡水相比普通饮料，最大的顾虑或阻碍是什么？"
+    ],
+    quantQuestions: [
+      { text: "你会购买 0 糖气泡水吗？", type: "single", options: "一定会, 可能会, 不确定, 不会", scale: "1-5", rows: "" },
+      { text: "你对 0 糖饮品的健康重视程度", type: "scale", options: "", scale: "1-5", rows: "" },
+      { text: "你更偏好的饮用场景是？", type: "multiple", options: "办公室, 运动后, 聚餐, 居家, 外出通勤", scale: "1-5", rows: "" },
+      { text: "请评价以下因素对购买决策的重要性", type: "matrix", options: "1, 2, 3, 4, 5", scale: "1-5", rows: "口味, 价格, 成分健康, 包装设计, 品牌知名度" }
+    ],
+    audienceConfig: { age: "25-34 岁", gender: "女性 55% / 男性 45%", city: "一线 / 新一线城市", income: "月收入 8k-20k", usage: "每周 2-3 次购买同类饮品", price: "中高价格敏感", lifestyle: "健康意识, 尝鲜意愿, 社交分享" }
+  },
+  {
+    topic: "新能源汽车购买决策因素",
+    audience: "一线城市潜在购车者",
+    tags: ["续航", "价格", "品牌", "充电"],
+    qualQuestions: [
+      "在考虑购买新能源汽车时，你最关注哪些因素？",
+      "你在新能源车与传统燃油车之间犹豫不决的主要原因是什么？",
+      "如果要购买新能源车，你更倾向哪种品牌和充电方案？"
+    ],
+    quantQuestions: [
+      { text: "你更倾向于购买哪种类型的新能源车？", type: "single", options: "纯电动, 插电混动, 增程式, 不确定", scale: "1-5", rows: "" },
+      { text: "你对新能源车续航能力的重视程度", type: "scale", options: "", scale: "1-10", rows: "" },
+      { text: "影响你购买新能源车的主要因素有哪些？", type: "multiple", options: "续航, 价格, 品牌, 充电便利性, 政策支持, 智能配置", scale: "1-5", rows: "" },
+      { text: "请评价以下因素对购车决策的重要性", type: "matrix", options: "1, 2, 3, 4, 5", scale: "1-5", rows: "续航, 价格, 品牌, 充电便利性, 安全性能" }
+    ],
+    audienceConfig: { age: "28-45 岁", gender: "男性 58% / 女性 42%", city: "一线 / 新一线城市", income: "家庭月收入 25k+", usage: "正在比较新能源车型和充电条件", price: "高价格敏感", lifestyle: "理性比较, 技术关注, 家庭决策" }
+  },
+  {
+    topic: "海外用户对短视频电商的接受度",
+    audience: "北美 / 欧洲 / 日韩用户",
+    tags: ["跨境电商", "短视频", "消费习惯"],
+    qualQuestions: [
+      "你通常会在短视频平台上购买商品吗？",
+      "短视频电商与传统电商相比，你更倾向哪种购物方式？",
+      "哪些因素会影响你通过短视频购买海外商品的意愿？"
+    ],
+    quantQuestions: [
+      { text: "你会通过短视频平台购买商品吗？", type: "single", options: "经常, 偶尔, 很少, 从不", scale: "1-5", rows: "" },
+      { text: "你对短视频电商的信任程度", type: "scale", options: "", scale: "1-5", rows: "" },
+      { text: "你更倾向于通过哪种渠道购买海外商品？", type: "multiple", options: "短视频平台, 传统电商, 品牌官网, 代购, 社交媒体", scale: "1-5", rows: "" },
+      { text: "请评价以下因素对短视频购买决策的影响", type: "matrix", options: "1, 2, 3, 4, 5", scale: "1-5", rows: "价格优势, 内容真实性, 物流速度, 品牌知名度, 售后保障" }
+    ],
+    audienceConfig: { age: "22-40 岁", gender: "均衡", city: "北美 / 欧洲 / 日韩核心城市", income: "中等及以上收入", usage: "每周观看短视频并有线上购物经验", price: "中等价格敏感", lifestyle: "内容驱动, 便利导向, 信任审慎" }
+  },
+  {
+    topic: "小红书用户社交需求探索",
+    audience: "小红书活跃用户",
+    tags: ["内容偏好", "互动", "社区氛围"],
+    qualQuestions: [
+      "你使用小红书的主要目的是什么？",
+      "小红书的内容和互动方式与其他社交平台有什么不同？",
+      "你希望小红书在未来增加哪些功能或改进哪些方面？"
+    ],
+    quantQuestions: [
+      { text: "你每天使用小红书的频率是多少？", type: "single", options: "每天多次, 每天一次, 每周几次, 很少使用", scale: "1-5", rows: "" },
+      { text: "你对小红书社区氛围的满意度", type: "scale", options: "", scale: "1-5", rows: "" },
+      { text: "你更偏好哪些类型的内容？", type: "multiple", options: "美妆护肤, 穿搭分享, 美食探店, 旅行攻略, 生活方式, 知识干货", scale: "1-5", rows: "" },
+      { text: "请评价以下因素对小红书体验的重要性", type: "matrix", options: "1, 2, 3, 4, 5", scale: "1-5", rows: "内容质量, 互动体验, 社区氛围, 推荐精准度, 使用流畅度" }
+    ],
+    audienceConfig: { age: "22-35 岁", gender: "女性 75% / 男性 25%", city: "一线 / 新一线城市", income: "月收入 6k-18k", usage: "每天浏览小红书并参与互动", price: "中等价格敏感", lifestyle: "内容消费, 社交分享, 审美驱动" }
+  },
+  {
+    topic: "母婴用品选购痛点",
+    audience: "0-3 岁宝宝妈妈",
+    tags: ["安全", "价格", "品牌", "渠道"],
+    qualQuestions: [
+      "在选购母婴用品时，你最看重哪些因素？",
+      "你在购买母婴用品时遇到过哪些困扰或痛点？",
+      "你更倾向于通过哪些渠道购买母婴用品，为什么？"
+    ],
+    quantQuestions: [
+      { text: "你在购买母婴用品时最关注的因素是什么？", type: "single", options: "安全性, 价格, 品牌口碑, 使用便利性, 亲友推荐", scale: "1-5", rows: "" },
+      { text: "你对母婴用品价格的敏感度", type: "scale", options: "", scale: "1-5", rows: "" },
+      { text: "你通常通过哪些渠道购买母婴用品？", type: "multiple", options: "线上电商, 品牌官网, 母婴店, 超市, 社交电商, 代购", scale: "1-5", rows: "" },
+      { text: "请评价以下因素对母婴用品选购的重要性", type: "matrix", options: "1, 2, 3, 4, 5", scale: "1-5", rows: "安全性, 价格, 品牌口碑, 使用便利性, 售后保障" }
+    ],
+    audienceConfig: { age: "28-38 岁", gender: "女性 90% / 男性 10%", city: "一线 / 二线城市", income: "家庭月收入 15k-35k", usage: "高频关注母婴用品安全与口碑", price: "中等价格敏感", lifestyle: "安全优先, 品牌信任, 渠道比较" }
+  }
 ];
 
 const state = {
@@ -189,10 +269,13 @@ function clearApiKey() {
 
 function useTemplate(index) {
   const template = templates[index];
-  state.topic = template[0];
-  state.audience = template[1];
-  state.audienceConfig = audiencePreset(template[1]);
+  state.topic = template.topic;
+  state.audience = template.audience;
+  state.audienceConfig = { ...template.audienceConfig };
+  state.qualQuestions = [...template.qualQuestions];
+  state.quantQuestions = template.quantQuestions.map((q) => ({ ...q }));
   state.result = null;
+  state.generateError = "";
   route(state.mode);
   toast("模板已填入");
 }
@@ -781,7 +864,7 @@ function TemplatePanel() {
       <div class="template-strip">
         ${indexes.map((index) => {
           const item = templates[index];
-          return `<button class="template-card" data-template="${index}"><strong>${item[0]}</strong><span>${item[1]}</span></button>`;
+          return `<button class="template-card" data-template="${index}"><strong>${item.topic}</strong><span>${item.audience}</span></button>`;
         }).join("")}
       </div>
     </section>
