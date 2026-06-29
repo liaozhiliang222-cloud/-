@@ -54,6 +54,7 @@ const state = {
   progress: 0,
   generateStatus: "",
   result: null,
+  generateError: "",
   showApiPrompt: false,
   deferredInstallPrompt: null,
   installAvailable: false,
@@ -76,7 +77,21 @@ function getSavedKey(provider = state.provider) {
 }
 
 function hasModelReady() {
-  return Boolean(getSavedKey());
+  const key = getSavedKey();
+  if (!key || key.trim().length < 6) return false;
+  // 排除明显不是真实 Key 的输入（如"123456"、"test"等）
+  const trimmed = key.trim();
+  if (/^(test|123|abc|key|api|demo|mock|fake|none|no|无)$/i.test(trimmed)) return false;
+  if (trimmed.length < 10 && !trimmed.includes("-")) return false;
+  return true;
+}
+
+function validateApiConfig() {
+  const { baseUrl, model, key } = getApiConfig();
+  if (!key) return "未检测到 API Key，请先到「模型设置」中保存你的 API Key。";
+  if (key.trim().length < 6) return "API Key 太短，看起来不是有效的 Key。请检查并重新输入。";
+  if (!baseUrl) return "未设置 API 地址。如果是自定义模型，请填写 Base URL。";
+  return null;
 }
 
 function getApiConfig() {
@@ -94,6 +109,7 @@ function getApiConfig() {
 function route(page) {
   if (page === "qual" || page === "quant") state.mode = page;
   state.page = page;
+  state.generateError = ""; // 切换页面时清除错误
   render();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -346,34 +362,54 @@ ${questions}
 }
 
 async function callAI(prompt, onProgress) {
-  const { baseUrl, model, key } = getApiConfig();
-  if (!key) throw new Error("未设置 API Key");
-  if (!baseUrl) throw new Error("未设置 API 地址");
+  const configError = validateApiConfig();
+  if (configError) throw new Error(configError);
 
+  const { baseUrl, model, key } = getApiConfig();
   state.abortController = new AbortController();
 
-  const response = await fetch(baseUrl, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${key}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: model,
-      messages: [
-        { role: "system", content: "你是一位专业的市场研究专家，擅长消费者行为分析。请严格按照用户要求的格式输出，只输出JSON，不要输出任何其他解释文字。" },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.8,
-      max_tokens: 4000,
-      stream: true
-    }),
-    signal: state.abortController.signal
-  });
+  let response;
+  try {
+    response = await fetch(baseUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [
+          { role: "system", content: "你是一位专业的市场研究专家，擅长消费者行为分析。请严格按照用户要求的格式输出，只输出JSON，不要输出任何其他解释文字。" },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.8,
+        max_tokens: 4000,
+        stream: true
+      }),
+      signal: state.abortController.signal
+    });
+  } catch (networkError) {
+    // 网络请求失败（DNS、连接被拒绝、CORS 等）
+    throw new Error("网络请求失败：无法连接到模型服务。可能原因：1）API 地址错误；2）网络不通；3）浏览器 CORS 限制。请检查「模型设置」中的 Base URL 是否正确。");
+  }
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
-    throw new Error(`API 错误 ${response.status}: ${errorText}`);
+    let friendlyMsg = "";
+    if (response.status === 401) {
+      friendlyMsg = "API Key 无效或已过期。请检查「模型设置」中的 API Key 是否正确，或前往对应平台重新生成 Key。";
+    } else if (response.status === 403) {
+      friendlyMsg = "无权限访问该模型。可能原因：Key 没有对应模型的调用权限，或账户余额不足。请检查模型平台的账户状态。";
+    } else if (response.status === 429) {
+      friendlyMsg = "请求过于频繁，已达到模型平台的速率限制。请稍等片刻后重试。";
+    } else if (response.status >= 500 && response.status < 600) {
+      friendlyMsg = `模型服务暂时不可用（错误 ${response.status}）。这是模型提供方的问题，请稍后重试。`;
+    } else if (response.status === 400) {
+      friendlyMsg = `请求参数错误（${response.status}）。可能原因：模型名称不正确，或请求内容过长。请检查「模型设置」中的模型名称。`;
+    } else {
+      friendlyMsg = `API 调用失败（错误 ${response.status}）。响应内容：${errorText.slice(0, 200)}`;
+    }
+    throw new Error(friendlyMsg);
   }
 
   const reader = response.body.getReader();
@@ -543,6 +579,7 @@ async function startGeneration() {
       }
     }
 
+    state.generateError = "";
     state.result = parsed;
     state.isGenerating = false;
     state.progress = total;
@@ -555,6 +592,7 @@ async function startGeneration() {
       state.isGenerating = false;
       state.progress = 0;
       state.generateStatus = "";
+      state.generateError = "";
       toast("已取消生成");
       render();
       return;
@@ -563,7 +601,8 @@ async function startGeneration() {
     state.isGenerating = false;
     state.progress = 0;
     state.generateStatus = "";
-    toast(`生成失败: ${error.message}`);
+    state.generateError = error.message || "未知错误，请查看控制台日志";
+    toast("生成失败，请查看下方错误提示");
     render();
   }
 }
@@ -954,6 +993,7 @@ function CustomModelFields() {
 
 function ResultPage() {
   if (state.isGenerating) return LoadingResult();
+  if (!state.result && state.generateError) return ErrorResult();
   if (!state.result) return EmptyResult();
   return state.mode === "qual" ? QualResultPage() : QuantResultPage();
 }
@@ -968,6 +1008,21 @@ function LoadingResult() {
         <p class="audience">${state.generateStatus || "正在连接 AI..."}</p>
         <p class="audience">进度 ${Math.min(state.progress, total)}/${total}</p>
         <div class="actions" style="justify-content:center"><button class="ghost" data-action="cancel-generation">取消生成</button></div>
+      </div>
+    </section>
+  `;
+}
+
+function ErrorResult() {
+  return `
+    <section class="container">
+      <div class="empty-state" style="border: 1px solid #E8534A; border-radius: 12px; padding: 24px; background: #FFF5F5;">
+        <h1 style="color: #C53030;">❌ 生成失败</h1>
+        <p style="color: #742A2A; white-space: pre-wrap; line-height: 1.6; max-width: 600px; margin: 16px auto;">${escapeHtml(state.generateError)}</p>
+        <div class="actions" style="justify-content:center; margin-top: 20px;">
+          <button class="primary" data-route="${state.mode}">返回修改研究内容</button>
+          <button class="secondary" data-action="go-settings">去模型设置</button>
+        </div>
       </div>
     </section>
   `;
@@ -1181,7 +1236,10 @@ function bindEvents() {
     }
     if (action === "copy") copyResult();
     if (action === "copy-analysis") copyAnalysis();
-    if (action === "regenerate") startGeneration();
+    if (action === "regenerate") {
+      state.generateError = "";
+      startGeneration();
+    }
     if (action === "cancel-generation") {
       if (state.abortController) {
         state.abortController.abort();
@@ -1189,6 +1247,7 @@ function bindEvents() {
       state.isGenerating = false;
       state.progress = 0;
       state.generateStatus = "";
+      state.generateError = "";
       route(state.mode);
     }
   });
