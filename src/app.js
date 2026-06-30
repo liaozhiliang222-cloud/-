@@ -640,7 +640,7 @@ async function callAI(prompt, onProgress) {
         abortError.name = "AbortError";
         throw abortError;
       }
-      throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请重试，或先使用本地模拟数据预览结果。");
+      throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请稍后重试，或返回修改研究内容后重新生成。");
     }
     // 网络请求失败（DNS、连接被拒绝、CORS 等）
     throw new Error("网络请求失败：无法连接到模型服务。可能原因：1）API 地址错误；2）网络不通；3）浏览器 CORS 限制。请检查「模型设置」中的 Base URL 是否正确。");
@@ -708,7 +708,7 @@ async function callAI(prompt, onProgress) {
         abortError.name = "AbortError";
         throw abortError;
       }
-      throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请重试，或先使用本地模拟数据预览结果。");
+      throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请稍后重试，或返回修改研究内容后重新生成。");
     }
     throw streamError;
   } finally {
@@ -1166,6 +1166,7 @@ function QualPage() {
 }
 
 function QuantPage() {
+  const modelReady = hasModelReady();
   return `
     <section class="container">
       <div class="page-layout">
@@ -1191,8 +1192,10 @@ function QuantPage() {
             ${QuantQuestionForm()}
           </section>
           <div class="generate-bar">
-            <button class="primary large-action" data-action="generate-mock" ${hasResearchReady() ? "" : "disabled"}>生成模拟结果</button>
-            <button class="ghost large-action" data-action="generate" ${hasResearchReady() ? "" : "disabled"}>用 AI 增强生成</button>
+            ${modelReady
+              ? `<button class="primary large-action" data-action="generate" ${hasResearchReady() ? "" : "disabled"}>生成问卷结果</button>`
+              : `<button class="primary large-action" data-action="generate-mock" ${hasResearchReady() ? "" : "disabled"}>生成模拟结果</button>
+                 <button class="ghost large-action" data-action="generate" ${hasResearchReady() ? "" : "disabled"}>设置 API 后生成</button>`}
           </div>
         </div>
       </div>
@@ -1402,13 +1405,14 @@ function QuantQuestionConfig(question, index) {
 }
 
 function ApiPromptModal() {
+  const modelReady = hasModelReady();
   return `
     <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label="未设置有效 API Key">
       <div class="modal">
         <h2>未设置有效 API Key</h2>
         <p>你当前未设置有效的 API Key。可以使用模拟数据快速体验原型功能，或去设置真实的 API Key。</p>
         <div class="actions">
-          <button class="primary" data-action="use-mock">使用模拟数据预览</button>
+          ${modelReady ? "" : `<button class="primary" data-action="use-mock">使用模拟数据预览</button>`}
           <button class="secondary" data-action="go-settings">去设置 API Key</button>
           <button class="ghost" data-action="close-api-prompt">取消</button>
         </div>
@@ -1509,6 +1513,7 @@ function LoadingResult() {
 }
 
 function ErrorResult() {
+  const modelReady = hasModelReady();
   return `
     <section class="container">
       <div class="empty-state" style="border: 1px solid #E8534A; border-radius: 12px; padding: 24px; background: #FFF5F5;">
@@ -1516,7 +1521,7 @@ function ErrorResult() {
         <p style="color: #742A2A; white-space: pre-wrap; line-height: 1.6; max-width: 600px; margin: 16px auto;">${escapeHtml(state.generateError)}</p>
         <div class="actions" style="justify-content:center; margin-top: 20px;">
           <button class="primary" data-route="${state.mode}">返回修改研究内容</button>
-          <button class="secondary" data-action="use-mock">使用本地模拟数据</button>
+          ${modelReady ? "" : `<button class="secondary" data-action="use-mock">使用本地模拟数据</button>`}
           <button class="secondary" data-action="go-settings">去模型设置</button>
         </div>
       </div>
