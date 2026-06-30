@@ -1,5 +1,17 @@
-const CACHE_NAME = "synthuser-pwa-v20";
-const ASSETS = ["/", "/index.html", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png", "/icons/icon-512.png", "/icons/icon-maskable-192.png", "/icons/icon-maskable-512.png", "/icons/apple-touch-icon.png", "/src/app.js?v=20", "/src/styles.css?v=12"];
+const APP_VERSION = "26";
+const CACHE_NAME = `synthuser-pwa-v${APP_VERSION}`;
+const ASSETS = [
+  "/index.html",
+  "/manifest.webmanifest",
+  "/icons/icon.svg",
+  "/icons/icon-192.png",
+  "/icons/icon-512.png",
+  "/icons/icon-maskable-192.png",
+  "/icons/icon-maskable-512.png",
+  "/icons/apple-touch-icon.png",
+  `/src/app.js?v=${APP_VERSION}`,
+  `/src/styles.css?v=${APP_VERSION}`
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -10,45 +22,59 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
-        keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
-      );
-    }).then(() => self.clients.claim())
-  );
-  // 通知所有客户端：新版本已激活
-  event.waitUntil(
-    self.clients.matchAll({ type: "window" }).then((clients) => {
-      clients.forEach((client) => client.postMessage({ type: "SW_UPDATED" }));
-    })
+    caches.keys()
+      .then((keys) => {
+        return Promise.all(
+          keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+        );
+      })
+      .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
-  const url = new URL(event.request.url);
-  const path = url.pathname;
 
-  // index.html 和 sw.js 使用 network-first，确保每次获取最新
-  if (path === "/" || path === "/index.html" || path === "/sw.js") {
-    event.respondWith(
-      fetch(event.request, { cache: "no-store" })
-        .then((response) => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          return response;
-        })
-        .catch(() => {
-          return caches.match(event.request).then((cached) => cached || caches.match("/"));
-        })
-    );
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
+
+  if (event.request.mode === "navigate") {
+    event.respondWith(networkFirst(event.request, "/index.html"));
     return;
   }
 
-  // 其他资源：cache-first（带版本号的资源天然不会冲突）
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return cached || fetch(event.request).catch(() => caches.match("/"));
-    })
-  );
+  if (["/index.html", "/sw.js", "/manifest.webmanifest"].includes(url.pathname)) {
+    event.respondWith(networkFirst(event.request));
+    return;
+  }
+
+  event.respondWith(cacheFirst(event.request));
 });
+
+async function networkFirst(request, fallbackUrl) {
+  try {
+    const response = await fetch(request, { cache: "no-store" });
+    if (response.ok) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(request, response.clone());
+    }
+    return response;
+  } catch {
+    const cached = await caches.match(request);
+    if (cached) return cached;
+    if (fallbackUrl) return caches.match(fallbackUrl);
+    throw new Error("Network request failed and no cache is available.");
+  }
+}
+
+async function cacheFirst(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+
+  const response = await fetch(request);
+  if (response.ok) {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(request, response.clone());
+  }
+  return response;
+}

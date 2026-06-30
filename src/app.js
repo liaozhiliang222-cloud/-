@@ -5,6 +5,8 @@ const MODEL_CONFIG = {
   custom: { name: "自定义模型", key: "synthuser_api_key_custom", placeholder: "兼容 OpenAI 格式的 API Key", model: "your-model-name", baseUrl: "" }
 };
 
+const GENERATION_TIMEOUT_MS = 90000;
+
 const templates = [
   {
     topic: "0 糖气泡水概念测试",
@@ -278,6 +280,24 @@ function hasResearchReady() {
   });
 }
 
+function splitList(value) {
+  return String(value || "")
+    .split(/[,，、\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeTo100(values) {
+  const safeValues = values.map((value) => Math.max(0, Number(value) || 0));
+  const total = safeValues.reduce((sum, value) => sum + value, 0);
+  if (!total) return safeValues.map(() => 0);
+
+  const normalized = safeValues.map((value) => Math.round((value / total) * 100));
+  const diff = 100 - normalized.reduce((sum, value) => sum + value, 0);
+  if (normalized.length) normalized[0] += diff;
+  return normalized;
+}
+
 function saveModelSettings() {
   syncSettingsForm();
   const key = state.apiKey.trim();
@@ -487,6 +507,9 @@ async function callAI(prompt, onProgress) {
 
   const { baseUrl, model, key } = getApiConfig();
   state.abortController = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    state.abortController?.abort("timeout");
+  }, GENERATION_TIMEOUT_MS);
 
   let response;
   try {
@@ -509,6 +532,14 @@ async function callAI(prompt, onProgress) {
       signal: state.abortController.signal
     });
   } catch (networkError) {
+    if (networkError.name === "AbortError" || state.abortController?.signal.aborted) {
+      if (state.abortController?.signal.reason === "user") {
+        const abortError = new Error("已取消生成");
+        abortError.name = "AbortError";
+        throw abortError;
+      }
+      throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请重试，或先使用本地模拟数据预览结果。");
+    }
     // 网络请求失败（DNS、连接被拒绝、CORS 等）
     throw new Error("网络请求失败：无法连接到模型服务。可能原因：1）API 地址错误；2）网络不通；3）浏览器 CORS 限制。请检查「模型设置」中的 Base URL 是否正确。");
   }
@@ -536,30 +567,59 @@ async function callAI(prompt, onProgress) {
   const decoder = new TextDecoder();
   let buffer = "";
   let fullContent = "";
+  let rawContent = "";
+  let hasSseData = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop();
+      const chunkText = decoder.decode(value, { stream: true });
+      rawContent += chunkText;
+      buffer += chunkText;
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data: ")) continue;
-      const data = trimmed.slice(6);
-      if (data === "[DONE]") continue;
-      try {
-        const parsed = JSON.parse(data);
-        const delta = parsed.choices?.[0]?.delta?.content || "";
-        if (delta) {
-          fullContent += delta;
-          if (onProgress) onProgress(delta, fullContent);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data: ")) continue;
+        hasSseData = true;
+        const data = trimmed.slice(6);
+        if (data === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content || "";
+          if (delta) {
+            fullContent += delta;
+            if (onProgress) onProgress(delta, fullContent);
+          }
+        } catch (e) {
+          // 忽略解析错误
         }
-      } catch (e) {
-        // 忽略解析错误
       }
+    }
+  } catch (streamError) {
+    if (streamError.name === "AbortError" || state.abortController?.signal.aborted) {
+      if (state.abortController?.signal.reason === "user") {
+        const abortError = new Error("已取消生成");
+        abortError.name = "AbortError";
+        throw abortError;
+      }
+      throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请重试，或先使用本地模拟数据预览结果。");
+    }
+    throw streamError;
+  } finally {
+    window.clearTimeout(timeoutId);
+    state.abortController = null;
+  }
+
+  if (!fullContent && !hasSseData && rawContent.trim()) {
+    try {
+      const parsed = JSON.parse(rawContent);
+      return parsed.choices?.[0]?.message?.content || parsed.choices?.[0]?.delta?.content || rawContent;
+    } catch {
+      return rawContent;
     }
   }
 
@@ -622,7 +682,7 @@ function makeQuantResult() {
     if (question.type === "scale") {
       const distribution = question.scale === "1-10" ? [2, 3, 5, 8, 12, 16, 20, 18, 10, 6] : question.scale === "1-7" ? [4, 8, 13, 24, 27, 16, 8] : [8, 15, 25, 35, 17];
       const mean = distribution.reduce((sum, count, i) => sum + count * (i + 1), 0) / 100;
-      return { ...question, index, distribution, mean: mean.toFixed(1), sd: question.scale === "1-7" ? "1.4" : "0.9" };
+      return { ...question, index, distribution, mean: mean.toFixed(1), sd: question.scale === "1-10" ? "2.0" : question.scale === "1-7" ? "1.4" : "0.9" };
     }
     if (question.type === "matrix") {
       const rows = splitList(question.rows);
@@ -638,25 +698,31 @@ function makeQuantResult() {
     }
     const opts = splitList(question.options);
     const base = question.type === "multiple" ? [58, 46, 34, 28, 16] : [42, 31, 17, 10, 6];
-    const values = base.slice(0, opts.length);
+    const values = opts.map((_, optionIndex) => base[optionIndex] ?? Math.max(8, 24 - optionIndex * 3));
     const normalized = question.type === "single" ? normalizeTo100(values) : values;
     return { ...question, index, optionsArray: opts, values: normalized };
   });
+  const firstQuestion = questions.find((question) => question.type === "single" || question.type === "multiple");
+  const matrixQuestion = questions.find((question) => question.type === "matrix");
+  const scaleQuestion = questions.find((question) => question.type === "scale");
+  const topOption = firstQuestion?.optionsArray?.[0] || "核心选项";
+  const topMatrixRow = matrixQuestion?.matrix?.sort((a, b) => Number(b.mean) - Number(a.mean))?.[0]?.row || "关键因素";
+  const scaleLabel = scaleQuestion?.text || "核心态度指标";
   return {
     questions,
     isMock: true,
     analysis: {
-      summary: `当前模拟样本 N=${state.sampleSize}，合成人群为"${audienceSummary()}"。结果显示购买意向和健康重视度存在正向关系，多场景触发比单一卖点更适合进入正式问卷验证。`,
+      summary: `当前模拟样本 N=${state.sampleSize}，合成人群为"${audienceSummary()}"。结果显示「${topOption}」是相对更突出的选择方向，「${topMatrixRow}」是影响判断的关键因素，${scaleLabel} 可作为后续正式问卷的核心交叉分析变量。`,
       exports: ["原始样本 CSV", "统计汇总 CSV", "分析摘要 Markdown"],
       findings: [
-        "购买意向集中在“可能会”，说明概念具备探索价值但仍需强化转化理由。",
-        "矩阵题显示口味和成分权重最高，价格是明显的二级影响因素。",
-        "建议正式投放前增加城市层级或使用频率交叉分析。"
+        `选择倾向集中在「${topOption}」，说明该方向可作为后续概念验证或方案筛选的优先观察点。`,
+        `矩阵题中「${topMatrixRow}」权重最高，建议在正式问卷中保留并做分群对比。`,
+        "建议正式投放前增加城市层级、收入/消费力或使用场景交叉分析。"
       ],
       crosstab: [
-        ["健康重视高", "一定会/可能会", "68%"],
-        ["健康重视中", "一定会/可能会", "47%"],
-        ["健康重视低", "一定会/可能会", "29%"]
+        ["核心态度高", `选择「${topOption}」`, "68%"],
+        ["核心态度中", `选择「${topOption}」`, "47%"],
+        ["核心态度低", `选择「${topOption}」`, "29%"]
       ]
     }
   };
@@ -682,8 +748,15 @@ function startMockGeneration() {
     state.progress += 1;
     if (state.progress > total) {
       window.clearInterval(timer);
+      try {
+        state.result = state.mode === "qual" ? makeQualResult() : makeQuantResult();
+        state.generateError = "";
+      } catch (error) {
+        console.error("模拟数据生成失败:", error);
+        state.result = null;
+        state.generateError = error.message || "模拟数据生成失败，请检查问卷配置。";
+      }
       state.isGenerating = false;
-      state.result = state.mode === "qual" ? makeQualResult() : makeQuantResult();
       state.generateStatus = "";
       render();
     }
@@ -711,23 +784,28 @@ async function startGeneration() {
   state.resultTab = "primary";
   render();
 
+  let progressTimer = null;
+  let statusTimer = null;
+
   try {
     const prompt = state.mode === "qual" ? buildQualPrompt() : buildQuantPrompt();
     const total = state.mode === "qual" ? 6 : Math.max(5, state.quantQuestions.length + 2);
 
     let fullContent = "";
-    let progressTimer = null;
 
     // 进度条动画
     progressTimer = window.setInterval(() => {
       if (state.progress < total) {
         state.progress += 1;
-        render();
+      } else {
+        state.generateStatus = "模型仍在返回结果，请稍候...";
       }
+      render();
     }, 800);
 
     // 更新状态文字
-    const statusTimer = window.setInterval(() => {
+    statusTimer = window.setInterval(() => {
+      if (state.progress >= total) return;
       if (state.mode === "qual") {
         if (state.progress <= 2) state.generateStatus = "正在构建虚拟用户画像...";
         else if (state.progress <= 4) state.generateStatus = `正在生成第 ${state.progress - 2} 位访谈对象的笔录...`;
@@ -746,6 +824,8 @@ async function startGeneration() {
 
     window.clearInterval(progressTimer);
     window.clearInterval(statusTimer);
+    progressTimer = null;
+    statusTimer = null;
 
     // 解析 JSON
     const jsonText = extractJSON(fullContent);
@@ -839,6 +919,9 @@ async function startGeneration() {
     state.generateError = error.message || "未知错误，请查看控制台日志";
     toast("生成失败，请查看下方错误提示");
     render();
+  } finally {
+    if (progressTimer) window.clearInterval(progressTimer);
+    if (statusTimer) window.clearInterval(statusTimer);
   }
 }
 
@@ -913,13 +996,17 @@ function App() {
         ${state.page === "result" ? ResultPage() : ""}
       </main>
       ${state.showApiPrompt ? ApiPromptModal() : ""}
-      ${state.toast ? (state.toast.includes("新版本") ? `<div class="toast" style="cursor:pointer;" data-action="reload-page">${state.toast}</div>` : `<div class="toast">${state.toast}</div>`) : ""}
+      ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
     </div>
   `;
 }
 
 function PwaStatusBar() {
-  const status = state.isStandalone ? "已作为应用运行" : state.isOnline ? "在线 · 支持安装和离线访问" : "离线模式 · 可查看已缓存页面";
+  const status = state.isStandalone
+    ? "已作为应用运行"
+    : state.isOnline
+      ? "在线 · 支持安装和离线访问"
+      : "离线模式 · 可查看已缓存页面";
   return `
     <div class="pwa-status">
       <div class="container pwa-status-inner">
@@ -991,7 +1078,8 @@ function QuantPage() {
             ${QuantQuestionForm()}
           </section>
           <div class="generate-bar">
-            <button class="primary large-action" data-action="generate" ${hasResearchReady() ? "" : "disabled"}>生成问卷结果</button>
+            <button class="primary large-action" data-action="generate-mock" ${hasResearchReady() ? "" : "disabled"}>生成模拟结果</button>
+            <button class="ghost large-action" data-action="generate" ${hasResearchReady() ? "" : "disabled"}>用 AI 增强生成</button>
           </div>
         </div>
       </div>
@@ -1271,6 +1359,7 @@ function ErrorResult() {
         <p style="color: #742A2A; white-space: pre-wrap; line-height: 1.6; max-width: 600px; margin: 16px auto;">${escapeHtml(state.generateError)}</p>
         <div class="actions" style="justify-content:center; margin-top: 20px;">
           <button class="primary" data-route="${state.mode}">返回修改研究内容</button>
+          <button class="secondary" data-action="use-mock">使用本地模拟数据</button>
           <button class="secondary" data-action="go-settings">去模型设置</button>
         </div>
       </div>
@@ -1432,7 +1521,8 @@ function escapeHtml(value) {
 
 function bindEvents() {
   document.body.addEventListener("click", (event) => {
-    const target = event.target.closest("button");
+    // 优先处理 button，但也支持 div 等非 button 元素上的 data-action
+    const target = event.target.closest("button") || event.target.closest("[data-action]");
     if (!target) return;
     const routeTarget = target.dataset.route;
     const action = target.dataset.action;
@@ -1477,6 +1567,7 @@ function bindEvents() {
       render();
     }
     if (action === "generate") startGeneration();
+    if (action === "generate-mock") startMockGeneration();
     if (action === "install-app") installApp();
     if (action === "go-settings") {
       state.showApiPrompt = false;
@@ -1494,14 +1585,12 @@ function bindEvents() {
     if (action === "copy-analysis") copyAnalysis();
     if (action === "regenerate") {
       state.generateError = "";
-      startGeneration();
-    }
-    if (action === "reload-page") {
-      window.location.reload();
+      if (state.result?.isMock) startMockGeneration();
+      else startGeneration();
     }
     if (action === "cancel-generation") {
       if (state.abortController) {
-        state.abortController.abort();
+        state.abortController.abort("user");
       }
       state.isGenerating = false;
       state.progress = 0;
@@ -1540,18 +1629,6 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").then((registration) => {
       // 每次加载页面时主动检查 Service Worker 更新
       registration.update();
-      
-      // 监听发现新版本
-      registration.addEventListener("updatefound", () => {
-        const newWorker = registration.installing;
-        if (!newWorker) return;
-        newWorker.addEventListener("statechange", () => {
-          if (newWorker.state === "activated") {
-            // 新版本已激活，提示用户刷新（不自动消失）
-            toast("🎉 发现新版本！点击刷新获取最新功能", 0);
-          }
-        });
-      });
     });
   });
 }
