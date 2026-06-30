@@ -156,20 +156,44 @@ function getSavedKey(provider = state.provider) {
   return localStorage.getItem(MODEL_CONFIG[provider].key) || "";
 }
 
+function validateKeyFormat(key, provider) {
+  const trimmed = key.trim();
+  if (!trimmed) return "未输入 API Key";
+  if (trimmed.length < 6) return `API Key 太短（只有 ${trimmed.length} 个字符），看起来不是有效的 Key`;
+  // 排除明显不是真实 Key 的输入
+  if (/^(test|123|abc|key|api|demo|mock|fake|none|no|无|11|111|222|333|000|123456|12345678)$/i.test(trimmed)) {
+    return "输入的内容明显不是有效的 API Key";
+  }
+  if (provider === "kimi" || provider === "deepseek") {
+    if (!trimmed.startsWith("sk-")) {
+      return `【提示】Kimi / DeepSeek 的 Key 通常以 sk- 开头，你输入的格式可能不正确`;
+    }
+    if (trimmed.length < 20) {
+      return `【提示】Key 长度过短（${trimmed.length} 字符），真实 Key 通常超过 50 字符`;
+    }
+  }
+  if (provider === "zhipu") {
+    if (trimmed.length < 15) {
+      return `【提示】智谱 API Key 长度不足（${trimmed.length} 字符），请检查是否复制完整`;
+    }
+  }
+  if (provider === "custom") {
+    if (trimmed.length < 10) {
+      return `【提示】自定义 Key 长度较短（${trimmed.length} 字符），请确认格式正确`;
+    }
+  }
+  return null; // 校验通过
+}
+
 function hasModelReady() {
   const key = getSavedKey();
-  if (!key || key.trim().length < 6) return false;
-  // 排除明显不是真实 Key 的输入（如"123456"、"test"等）
-  const trimmed = key.trim();
-  if (/^(test|123|abc|key|api|demo|mock|fake|none|no|无)$/i.test(trimmed)) return false;
-  if (trimmed.length < 10 && !trimmed.includes("-")) return false;
-  return true;
+  return validateKeyFormat(key, state.provider) === null;
 }
 
 function validateApiConfig() {
   const { baseUrl, model, key } = getApiConfig();
-  if (!key) return "未检测到 API Key，请先到「模型设置」中保存你的 API Key。";
-  if (key.trim().length < 6) return "API Key 太短，看起来不是有效的 Key。请检查并重新输入。";
+  const keyError = validateKeyFormat(key, state.provider);
+  if (keyError) return keyError;
   if (!baseUrl) return "未设置 API 地址。如果是自定义模型，请填写 Base URL。";
   return null;
 }
@@ -194,13 +218,15 @@ function route(page) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-function toast(message) {
+function toast(message, duration = 1800) {
   state.toast = message;
   render();
-  window.setTimeout(() => {
-    state.toast = "";
-    render();
-  }, 1800);
+  if (duration > 0) {
+    window.setTimeout(() => {
+      state.toast = "";
+      render();
+    }, duration);
+  }
 }
 
 function syncResearchForm() {
@@ -254,11 +280,22 @@ function hasResearchReady() {
 
 function saveModelSettings() {
   syncSettingsForm();
-  if (state.apiKey.trim()) localStorage.setItem(MODEL_CONFIG[state.provider].key, state.apiKey.trim());
+  const key = state.apiKey.trim();
+  if (key) {
+    const error = validateKeyFormat(key, state.provider);
+    if (error) {
+      toast("⚠️ " + error + "，已保存但可能无法调用");
+    } else {
+      toast("✅ 模型设置已保存，Key 格式校验通过");
+    }
+    localStorage.setItem(MODEL_CONFIG[state.provider].key, key);
+  } else {
+    localStorage.removeItem(MODEL_CONFIG[state.provider].key);
+    toast("API Key 已清除");
+  }
   localStorage.setItem("synthuser_provider", state.provider);
   localStorage.setItem("synthuser_custom_base_url", state.customBaseUrl.trim());
   localStorage.setItem("synthuser_custom_model", state.customModel.trim());
-  toast("模型设置已保存");
 }
 
 function clearApiKey() {
@@ -539,6 +576,121 @@ function extractJSON(text) {
   return text;
 }
 
+function makeQualResult() {
+  const names = ["林晓婧", "王建国", "陈雨桐", "周敏", "赵一鸣", "刘可"];
+  const cities = ["上海", "成都", "杭州", "广州", "北京", "武汉"];
+  const roles = ["价格敏感但愿意尝鲜", "重视成分和安全感", "看重社交分享属性", "偏理性，会比较替代品", "追求效率和便利", "注重品牌可信度"];
+  const avatars = ["女", "男", "研", "数", "策", "品"];
+  const users = names.map((name, index) => ({
+    avatar: avatars[index],
+    name,
+    age: 24 + index * 4,
+    city: cities[index],
+    role: roles[index],
+    persona: `${state.audienceConfig.age}，${state.audienceConfig.city}，${state.audienceConfig.lifestyle}`,
+    sentiment: index % 3 === 0 ? "谨慎正向" : index % 3 === 1 ? "中性观望" : "积极尝试",
+    answers: state.qualQuestions.map((question, qIndex) => ({
+      question,
+      answer: [
+        `第一感觉是有记忆点，但我会先看它和现有选择到底差在哪里。${state.topic} 如果能把核心卖点和使用场景说清楚，我愿意进一步了解。`,
+        "我更可能在明确需求出现时尝试，比如办公室囤货、朋友聚会或看到身边人推荐。价格不要太跳，首购门槛低会更容易下单。",
+        "最大的顾虑是宣传和真实体验不一致。成分、口味、售后评价这些细节，会直接影响我是不是把它当成长期选择。"
+      ][qIndex] || "这个问题我会结合自己的真实使用场景来判断，关键是要看到可信的证据和清晰的收益。"
+    }))
+  }));
+  return {
+    users,
+    isMock: true,
+    analysis: {
+      summary: `当前模拟样本中，6 位对象对 ${state.topic} 的整体态度以谨慎正向和观望为主。核心发现集中在：产品概念有吸引力，但转化需要更强的场景触发和信任背书。`,
+      themes: [
+        { name: "概念吸引力", value: 72, detail: "多数对象认可 ${state.topic} 的创新方向，但希望看到更具体的使用场景。" },
+        { name: "价格敏感度", value: 58, detail: "价格是关键顾虑，多数人期望低门槛试购机会。" },
+        { name: "信任与体验", value: 65, detail: "对宣传真实性和口碑评价有较高期待，成分和售后被反复提及。" }
+      ],
+      recommendations: [
+        "首屏卖点应聚焦一个强场景，而不是堆叠多个功效。",
+        "建议提供低门槛试饮装或组合装，降低首次尝试成本。",
+        "后续真实调研应重点验证价格带和复购驱动因素。"
+      ]
+    }
+  };
+}
+
+function makeQuantResult() {
+  const questions = state.quantQuestions.map((question, index) => {
+    if (question.type === "scale") {
+      const distribution = question.scale === "1-10" ? [2, 3, 5, 8, 12, 16, 20, 18, 10, 6] : question.scale === "1-7" ? [4, 8, 13, 24, 27, 16, 8] : [8, 15, 25, 35, 17];
+      const mean = distribution.reduce((sum, count, i) => sum + count * (i + 1), 0) / 100;
+      return { ...question, index, distribution, mean: mean.toFixed(1), sd: question.scale === "1-7" ? "1.4" : "0.9" };
+    }
+    if (question.type === "matrix") {
+      const rows = splitList(question.rows);
+      return {
+        ...question,
+        index,
+        matrix: rows.map((row, rowIndex) => ({
+          row,
+          mean: (3.4 + rowIndex * 0.25).toFixed(1),
+          distribution: [6 + rowIndex, 12, 24, 36 - rowIndex, 22]
+        }))
+      };
+    }
+    const opts = splitList(question.options);
+    const base = question.type === "multiple" ? [58, 46, 34, 28, 16] : [42, 31, 17, 10, 6];
+    const values = base.slice(0, opts.length);
+    const normalized = question.type === "single" ? normalizeTo100(values) : values;
+    return { ...question, index, optionsArray: opts, values: normalized };
+  });
+  return {
+    questions,
+    isMock: true,
+    analysis: {
+      summary: `当前模拟样本 N=${state.sampleSize}，合成人群为"${audienceSummary()}"。结果显示购买意向和健康重视度存在正向关系，多场景触发比单一卖点更适合进入正式问卷验证。`,
+      exports: ["原始样本 CSV", "统计汇总 CSV", "分析摘要 Markdown"],
+      findings: [
+        "购买意向集中在“可能会”，说明概念具备探索价值但仍需强化转化理由。",
+        "矩阵题显示口味和成分权重最高，价格是明显的二级影响因素。",
+        "建议正式投放前增加城市层级或使用频率交叉分析。"
+      ],
+      crosstab: [
+        ["健康重视高", "一定会/可能会", "68%"],
+        ["健康重视中", "一定会/可能会", "47%"],
+        ["健康重视低", "一定会/可能会", "29%"]
+      ]
+    }
+  };
+}
+
+function startMockGeneration() {
+  syncResearchForm();
+  if (!hasResearchReady()) {
+    toast("请补全研究内容");
+    return;
+  }
+  state.page = "result";
+  state.isGenerating = true;
+  state.progress = 1;
+  state.generateStatus = "正在生成模拟数据...";
+  state.result = null;
+  state.resultTab = "primary";
+  state.generateError = "";
+  render();
+
+  const total = state.mode === "qual" ? 6 : Math.max(5, state.quantQuestions.length + 2);
+  const timer = window.setInterval(() => {
+    state.progress += 1;
+    if (state.progress > total) {
+      window.clearInterval(timer);
+      state.isGenerating = false;
+      state.result = state.mode === "qual" ? makeQualResult() : makeQuantResult();
+      state.generateStatus = "";
+      render();
+    }
+    render();
+  }, 420);
+}
+
 async function startGeneration() {
   syncResearchForm();
   if (!hasModelReady()) {
@@ -761,7 +913,7 @@ function App() {
         ${state.page === "result" ? ResultPage() : ""}
       </main>
       ${state.showApiPrompt ? ApiPromptModal() : ""}
-      ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
+      ${state.toast ? (state.toast.includes("新版本") ? `<div class="toast" style="cursor:pointer;" data-action="reload-page">${state.toast}</div>` : `<div class="toast">${state.toast}</div>`) : ""}
     </div>
   `;
 }
@@ -1006,22 +1158,36 @@ function QuantQuestionConfig(question, index) {
 
 function ApiPromptModal() {
   return `
-    <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label="需要设置 API Key">
+    <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label="未设置有效 API Key">
       <div class="modal">
-        <h2>需要先设置 API Key</h2>
-        <p>生成会调用你自己的模型账号。请先到模型设置里保存 API Key，再回到这里继续生成。</p>
+        <h2>未设置有效 API Key</h2>
+        <p>你当前未设置有效的 API Key。可以使用模拟数据快速体验原型功能，或去设置真实的 API Key。</p>
         <div class="actions">
-          <button class="primary" data-action="go-settings">去模型设置</button>
-          <button class="ghost" data-action="close-api-prompt">稍后再说</button>
+          <button class="primary" data-action="use-mock">使用模拟数据预览</button>
+          <button class="secondary" data-action="go-settings">去设置 API Key</button>
+          <button class="ghost" data-action="close-api-prompt">取消</button>
         </div>
       </div>
     </div>
   `;
 }
 
+function KeyValidationHint() {
+  const key = state.apiKey.trim() || getSavedKey();
+  if (!key) return `<div class="notice">请输入你的 ${MODEL_CONFIG[state.provider].name} API Key</div>`;
+  const error = validateKeyFormat(key, state.provider);
+  if (error) {
+    return `<div style="color: #C53030; font-size: 13px; margin-top: 6px; line-height: 1.5;">⚠️ ${escapeHtml(error)}</div>`;
+  }
+  return `<div style="color: #2EB75B; font-size: 13px; margin-top: 6px;">✅ Key 格式校验通过</div>`;
+}
+
 function SettingsPage() {
   const config = MODEL_CONFIG[state.provider];
   if (!state.apiKey) state.apiKey = getSavedKey();
+  const key = state.apiKey.trim() || getSavedKey();
+  const validationError = key ? validateKeyFormat(key, state.provider) : null;
+  const isValid = !validationError;
   return `
     <section class="container">
       <div class="headline">
@@ -1044,7 +1210,7 @@ function SettingsPage() {
         <section class="panel">
           <div class="section-title">
             <div><h2>${config.name}</h2><p>Key 只保存在本地浏览器。不设置 API Key 则无法生成真实结果。</p></div>
-            <span class="status-pill">${getSavedKey() ? "已保存" : "待设置"}</span>
+            <span class="status-pill" style="${isValid ? 'background:#2EB75B;color:#fff;' : key ? 'background:#E8534A;color:#fff;' : ''}">${key ? (isValid ? "✅ 格式有效" : "⚠️ 格式异常") : "待设置"}</span>
           </div>
           <div class="form-grid">
             <div class="field">
@@ -1053,6 +1219,7 @@ function SettingsPage() {
                 <input id="api-key" type="${state.showKey ? "text" : "password"}" value="${escapeHtml(state.apiKey)}" placeholder="${config.placeholder}" />
                 <button class="ghost" data-action="toggle-key">${state.showKey ? "隐藏" : "显示"}</button>
               </div>
+              ${KeyValidationHint()}
             </div>
             ${state.provider === "custom" ? CustomModelFields() : ""}
             <div class="actions">
@@ -1131,12 +1298,13 @@ function ResultTabs() {
 }
 
 function QualResultPage() {
+  const mockTag = state.result?.isMock ? `<span style="display:inline-block;padding:3px 10px;background:#F5A623;color:#fff;border-radius:4px;font-size:12px;margin-left:8px;vertical-align:middle;">模拟数据</span>` : "";
   return `
     <section class="container">
       <div class="headline">
-        <span class="eyebrow">AI 定性研究结果</span>
-        <h1>${escapeHtml(state.topic)}</h1>
-        <p>以下笔录和分析由 AI 根据你设定的人群画像和研究问题实时生成。</p>
+        <span class="eyebrow">${state.result?.isMock ? "模拟" : "AI"} 定性研究结果</span>
+        <h1>${escapeHtml(state.topic)}${mockTag}</h1>
+        <p>${state.result?.isMock ? "以下笔录和分析由本地模拟数据生成，用于快速预览原型功能。建议设置真实 API Key 以获得更高质量结果。" : "以下笔录和分析由 AI 根据你设定的人群画像和研究问题实时生成。"}</p>
       </div>
       ${ResultTabs()}
       ${state.resultTab === "primary" ? QualTranscripts() : ""}
@@ -1146,12 +1314,13 @@ function QualResultPage() {
 }
 
 function QuantResultPage() {
+  const mockTag = state.result?.isMock ? `<span style="display:inline-block;padding:3px 10px;background:#F5A623;color:#fff;border-radius:4px;font-size:12px;margin-left:8px;vertical-align:middle;">模拟数据</span>` : "";
   return `
     <section class="container">
       <div class="headline">
-        <span class="eyebrow">AI 定量研究结果</span>
-        <h1>${escapeHtml(state.topic)}</h1>
-        <p>以下统计数据和分析由 AI 根据你设定的人群画像生成。</p>
+        <span class="eyebrow">${state.result?.isMock ? "模拟" : "AI"} 定量研究结果</span>
+        <h1>${escapeHtml(state.topic)}${mockTag}</h1>
+        <p>${state.result?.isMock ? "以下统计数据由本地模拟数据生成，用于快速预览原型功能。建议设置真实 API Key 以获得更高质量结果。" : "以下统计数据和分析由 AI 根据你设定的人群画像生成。"}</p>
       </div>
       ${ResultTabs()}
       ${state.resultTab === "primary" ? QuantStats() : ""}
@@ -1313,6 +1482,10 @@ function bindEvents() {
       state.showApiPrompt = false;
       route("settings");
     }
+    if (action === "use-mock") {
+      state.showApiPrompt = false;
+      startMockGeneration();
+    }
     if (action === "close-api-prompt") {
       state.showApiPrompt = false;
       render();
@@ -1322,6 +1495,9 @@ function bindEvents() {
     if (action === "regenerate") {
       state.generateError = "";
       startGeneration();
+    }
+    if (action === "reload-page") {
+      window.location.reload();
     }
     if (action === "cancel-generation") {
       if (state.abortController) {
@@ -1360,7 +1536,24 @@ render();
 bindEvents();
 
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js"));
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").then((registration) => {
+      // 每次加载页面时主动检查 Service Worker 更新
+      registration.update();
+      
+      // 监听发现新版本
+      registration.addEventListener("updatefound", () => {
+        const newWorker = registration.installing;
+        if (!newWorker) return;
+        newWorker.addEventListener("statechange", () => {
+          if (newWorker.state === "activated") {
+            // 新版本已激活，提示用户刷新（不自动消失）
+            toast("🎉 发现新版本！点击刷新获取最新功能", 0);
+          }
+        });
+      });
+    });
+  });
 }
 
 window.addEventListener("beforeinstallprompt", (event) => {
