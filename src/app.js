@@ -109,6 +109,11 @@ const state = {
     price: "中高价格敏感",
     lifestyle: "健康意识, 尝鲜意愿, 社交分享"
   },
+  quotaPlan: [
+    { id: "gender", name: "性别", items: [{ label: "女性", pct: 55 }, { label: "男性", pct: 45 }] },
+    { id: "age", name: "年龄", items: [{ label: "25-29 岁", pct: 45 }, { label: "30-34 岁", pct: 35 }, { label: "35-40 岁", pct: 20 }] },
+    { id: "city", name: "城市层级", items: [{ label: "一线城市", pct: 45 }, { label: "新一线城市", pct: 40 }, { label: "二线城市", pct: 15 }] }
+  ],
   provider: localStorage.getItem("synthuser_provider") || "kimi",
   apiKey: "",
   showKey: false,
@@ -251,6 +256,13 @@ function syncResearchForm() {
     price: $("#aud-price")?.value || state.audienceConfig.price,
     lifestyle: $("#aud-lifestyle")?.value || state.audienceConfig.lifestyle
   };
+  state.quotaPlan = state.quotaPlan.map((dimension) => ({
+    ...dimension,
+    items: dimension.items.map((item, itemIndex) => ({
+      label: $(`#quota-${dimension.id}-${itemIndex}-label`)?.value || item.label,
+      pct: Math.max(0, Math.min(100, Number($(`#quota-${dimension.id}-${itemIndex}-pct`)?.value ?? item.pct)))
+    })).filter((item) => item.label.trim())
+  }));
   state.qualQuestions = [0, 1, 2].map((index) => $(`#qual-${index}`)?.value || state.qualQuestions[index]);
   state.quantQuestions = state.quantQuestions.map((question, index) => ({
     text: $(`#q-text-${index}`)?.value || question.text,
@@ -298,6 +310,89 @@ function normalizeTo100(values) {
   return normalized;
 }
 
+function quotaFromAudienceConfig(config = state.audienceConfig) {
+  const genderItems = parseQuotaText(config.gender, [
+    { label: "女性", pct: 55 },
+    { label: "男性", pct: 45 }
+  ]);
+  const ageItems = parseRangeQuota(config.age, "年龄", [
+    { label: config.age || "目标年龄段", pct: 100 }
+  ]);
+  const cityItems = parseSlashQuota(config.city, [
+    { label: config.city || "目标城市", pct: 100 }
+  ]);
+  return [
+    { id: "gender", name: "性别", items: genderItems },
+    { id: "age", name: "年龄", items: ageItems },
+    { id: "city", name: "城市层级", items: cityItems }
+  ];
+}
+
+function parseQuotaText(text, fallback) {
+  const matches = [...String(text || "").matchAll(/([^/\d%]+?)\s*(\d+)%/g)]
+    .map((match) => ({ label: match[1].replace(/[，,、]/g, "").trim(), pct: Number(match[2]) }))
+    .filter((item) => item.label && item.pct > 0);
+  return matches.length ? normalizeQuotaItems(matches) : fallback;
+}
+
+function parseSlashQuota(text, fallback) {
+  const items = String(text || "")
+    .split("/")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((label) => ({ label, pct: 0 }));
+  return items.length ? distributeQuota(items) : fallback;
+}
+
+function parseRangeQuota(text, prefix, fallback) {
+  const match = String(text || "").match(/(\d+)\s*[-~—]\s*(\d+)/);
+  if (!match) return fallback;
+  const min = Number(match[1]);
+  const max = Number(match[2]);
+  const mid = Math.floor((min + max) / 2);
+  return distributeQuota([
+    { label: `${min}-${mid} 岁`, pct: 0 },
+    { label: `${mid + 1}-${max} 岁`, pct: 0 }
+  ]);
+}
+
+function distributeQuota(items) {
+  if (!items.length) return items;
+  const base = Math.floor(100 / items.length);
+  return items.map((item, index) => ({
+    ...item,
+    pct: index === 0 ? base + (100 - base * items.length) : base
+  }));
+}
+
+function normalizeQuotaItems(items) {
+  return items.map((item) => ({ ...item, pct: Math.round(item.pct) }));
+}
+
+function quotaTotal(dimension) {
+  return dimension.items.reduce((sum, item) => sum + (Number(item.pct) || 0), 0);
+}
+
+function quotaWarnings() {
+  return state.quotaPlan
+    .map((dimension) => ({ name: dimension.name, total: quotaTotal(dimension) }))
+    .filter((item) => item.total !== 100);
+}
+
+function quotaSummary() {
+  return state.quotaPlan
+    .map((dimension) => `${dimension.name}：${dimension.items.map((item) => `${item.label} ${item.pct}%`).join(" / ")}`)
+    .join("；");
+}
+
+function quotaSampleSummary() {
+  const n = state.mode === "qual" ? 6 : state.sampleSize;
+  return state.quotaPlan.map((dimension) => {
+    const items = dimension.items.map((item) => `${item.label} ${Math.round(n * item.pct / 100)}人`).join(" / ");
+    return `${dimension.name} ${items}`;
+  }).join("；");
+}
+
 function saveModelSettings() {
   syncSettingsForm();
   const key = state.apiKey.trim();
@@ -329,6 +424,7 @@ function useTemplate(index) {
   state.topic = template.topic;
   state.audience = template.audience;
   state.audienceConfig = { ...template.audienceConfig };
+  state.quotaPlan = quotaFromAudienceConfig(state.audienceConfig);
   state.qualQuestions = [...template.qualQuestions];
   state.quantQuestions = template.quantQuestions.map((q) => ({ ...q }));
   state.result = null;
@@ -388,11 +484,14 @@ ${state.topic}
 - 价格敏感度：${c.price}
 - 心理/生活方式标签：${c.lifestyle}
 
+## 配额设计
+${quotaSummary()}
+
 ## 访谈问题
 ${questions}
 
 ## 生成要求
-1. 生成6位差异化明显的虚拟访谈对象，每位对象有独特的人口统计特征、消费态度和行为模式。
+1. 生成6位差异化明显的虚拟访谈对象，每位对象有独特的人口统计特征、消费态度和行为模式，并尽量贴合配额设计。
 2. 为每位对象设定：姓名（中文真实姓名，避免重复）、年龄、所在城市、一句话角色标签（如"价格敏感但愿意尝鲜"）、整体态度倾向（谨慎正向/中性观望/积极尝试/消极拒绝）。
 3. 每位对象对每道问题给出详细、有深度的回答，回答要口语化、具体、有细节，避免空洞套话。回答应反映该对象的独特视角和真实顾虑。
 4. 回答长度适中，每道问题回答约80-150字。
@@ -454,6 +553,9 @@ ${state.topic}
 - 价格敏感度：${c.price}
 - 心理/生活方式标签：${c.lifestyle}
 
+## 配额设计
+${quotaSummary()}
+
 ## 模拟样本量
 N = ${state.sampleSize}
 
@@ -461,7 +563,7 @@ N = ${state.sampleSize}
 ${questions}
 
 ## 生成要求
-1. 为每道题目生成合理的统计分布，数据应反映目标人群的真实消费行为和态度倾向。
+1. 为每道题目生成合理的统计分布，数据应反映目标人群的真实消费行为、态度倾向和配额结构。
 2. 数据要有内在一致性，不同题目之间应有逻辑关联（例如：重视健康的人购买意愿更高）。
 3. 单选题：各选项百分比之和为100%，分布要合理（不要全部平均分配）。
 4. 多选题：各选项百分比可超过100%，反映选择该选项的人数比例。
@@ -638,14 +740,12 @@ function extractJSON(text) {
 
 function makeQualResult() {
   const names = ["林晓婧", "王建国", "陈雨桐", "周敏", "赵一鸣", "刘可"];
-  const cities = ["上海", "成都", "杭州", "广州", "北京", "武汉"];
   const roles = ["价格敏感但愿意尝鲜", "重视成分和安全感", "看重社交分享属性", "偏理性，会比较替代品", "追求效率和便利", "注重品牌可信度"];
-  const avatars = ["女", "男", "研", "数", "策", "品"];
   const users = names.map((name, index) => ({
-    avatar: avatars[index],
+    avatar: quotaLabelAt("gender", index).includes("男") ? "男" : "女",
     name,
-    age: 24 + index * 4,
-    city: cities[index],
+    age: mockAgeFromQuota(index),
+    city: quotaLabelAt("city", index),
     role: roles[index],
     persona: `${state.audienceConfig.age}，${state.audienceConfig.city}，${state.audienceConfig.lifestyle}`,
     sentiment: index % 3 === 0 ? "谨慎正向" : index % 3 === 1 ? "中性观望" : "积极尝试",
@@ -675,6 +775,19 @@ function makeQualResult() {
       ]
     }
   };
+}
+
+function quotaLabelAt(dimensionId, index) {
+  const dimension = state.quotaPlan.find((item) => item.id === dimensionId);
+  if (!dimension || !dimension.items.length) return "";
+  const expanded = dimension.items.flatMap((item) => Array(Math.max(1, Math.round(item.pct / 20))).fill(item.label));
+  return expanded[index % expanded.length] || dimension.items[0].label;
+}
+
+function mockAgeFromQuota(index) {
+  const label = quotaLabelAt("age", index);
+  const match = label.match(/(\d+)/);
+  return match ? Number(match[1]) + (index % 5) : 24 + index * 4;
 }
 
 function makeQuantResult() {
@@ -712,7 +825,7 @@ function makeQuantResult() {
     questions,
     isMock: true,
     analysis: {
-      summary: `当前模拟样本 N=${state.sampleSize}，合成人群为"${audienceSummary()}"。结果显示「${topOption}」是相对更突出的选择方向，「${topMatrixRow}」是影响判断的关键因素，${scaleLabel} 可作为后续正式问卷的核心交叉分析变量。`,
+      summary: `当前模拟样本 N=${state.sampleSize}，合成人群为"${audienceSummary()}"，配额结构为：${quotaSummary()}。结果显示「${topOption}」是相对更突出的选择方向，「${topMatrixRow}」是影响判断的关键因素，${scaleLabel} 可作为后续正式问卷的核心交叉分析变量。`,
       exports: ["原始样本 CSV", "统计汇总 CSV", "分析摘要 Markdown"],
       findings: [
         `选择倾向集中在「${topOption}」，说明该方向可作为后续概念验证或方案筛选的优先观察点。`,
@@ -1124,6 +1237,7 @@ function CommonResearchFields() {
 function AudienceBuilder() {
   const options = ["普通消费者", "年轻白领", "精致妈妈", "专业人士"];
   const c = state.audienceConfig;
+  const warnings = quotaWarnings();
   return `
     <div class="audience-builder">
       <div class="section-title compact-title">
@@ -1147,12 +1261,55 @@ function AudienceBuilder() {
         <label for="aud-lifestyle">心理 / 生活方式标签</label>
         <input id="aud-lifestyle" value="${escapeHtml(c.lifestyle)}" placeholder="例如：健康意识, 尝鲜意愿, 社交分享" />
       </div>
+      ${QuotaDesigner(warnings)}
       <div class="quota-preview">
         <span>预览</span>
         <strong>${state.mode === "qual" ? "6 位 AI 合成访谈对象" : `${state.sampleSize} 份 AI 模拟样本`}</strong>
         <p>${escapeHtml(audienceSummary())}</p>
+        <p>${escapeHtml(quotaSampleSummary())}</p>
       </div>
     </div>
+  `;
+}
+
+function QuotaDesigner(warnings) {
+  return `
+    <section class="quota-designer">
+      <div class="section-title compact-title">
+        <div>
+          <h2>配额设计</h2>
+          <p>控制合成人群结构。每组配额建议合计 100%，生成结果会按该结构模拟。</p>
+        </div>
+        <button class="ghost small-button" data-action="reset-quota">重置配额</button>
+      </div>
+      <div class="quota-grid">
+        ${state.quotaPlan.map((dimension) => QuotaDimension(dimension)).join("")}
+      </div>
+      ${warnings.length ? `<div class="quota-alert">${warnings.map((item) => `${item.name}合计 ${item.total}%`).join("；")}，建议调整为 100%。</div>` : `<div class="quota-ok">配额合计正确，可用于模拟样本结构。</div>`}
+    </section>
+  `;
+}
+
+function QuotaDimension(dimension) {
+  const total = quotaTotal(dimension);
+  return `
+    <article class="quota-card">
+      <div class="quota-card-head">
+        <strong>${dimension.name}</strong>
+        <span class="${total === 100 ? "quota-total ok" : "quota-total"}">${total}%</span>
+      </div>
+      <div class="quota-items">
+        ${dimension.items.map((item, index) => `
+          <div class="quota-item">
+            <input id="quota-${dimension.id}-${index}-label" value="${escapeHtml(item.label)}" aria-label="${dimension.name}配额名称" />
+            <input id="quota-${dimension.id}-${index}-pct" type="number" min="0" max="100" value="${item.pct}" aria-label="${dimension.name}配额比例" />
+            <span>%</span>
+            <button class="icon-button" title="删除配额项" data-remove-quota="${dimension.id}:${index}" ${dimension.items.length <= 1 ? "disabled" : ""}>×</button>
+          </div>
+        `).join("")}
+      </div>
+      <button class="ghost small-button" data-add-quota="${dimension.id}">添加配额项</button>
+    </article>
   `;
 }
 
@@ -1395,6 +1552,7 @@ function QualResultPage() {
         <h1>${escapeHtml(state.topic)}${mockTag}</h1>
         <p>${state.result?.isMock ? "以下笔录和分析由本地模拟数据生成，用于快速预览原型功能。建议设置真实 API Key 以获得更高质量结果。" : "以下笔录和分析由 AI 根据你设定的人群画像和研究问题实时生成。"}</p>
       </div>
+      ${QuotaResultSummary()}
       ${ResultTabs()}
       ${state.resultTab === "primary" ? QualTranscripts() : ""}
       ${state.resultTab === "analysis" ? QualAnalysis() : ""}
@@ -1411,9 +1569,20 @@ function QuantResultPage() {
         <h1>${escapeHtml(state.topic)}${mockTag}</h1>
         <p>${state.result?.isMock ? "以下统计数据由本地模拟数据生成，用于快速预览原型功能。建议设置真实 API Key 以获得更高质量结果。" : "以下统计数据和分析由 AI 根据你设定的人群画像生成。"}</p>
       </div>
+      ${QuotaResultSummary()}
       ${ResultTabs()}
       ${state.resultTab === "primary" ? QuantStats() : ""}
       ${state.resultTab === "analysis" ? QuantAnalysis() : ""}
+    </section>
+  `;
+}
+
+function QuotaResultSummary() {
+  return `
+    <section class="quota-result">
+      <strong>样本配额</strong>
+      <span>${escapeHtml(state.mode === "qual" ? "6 位合成访谈对象" : `${state.sampleSize} 份模拟样本`)}</span>
+      <p>${escapeHtml(quotaSampleSummary())}</p>
     </section>
   `;
 }
@@ -1536,6 +1705,7 @@ function bindEvents() {
     if (target.dataset.audience) {
       state.audience = target.dataset.audience;
       state.audienceConfig = audiencePreset(state.audience);
+      state.quotaPlan = quotaFromAudienceConfig(state.audienceConfig);
       render();
     }
     if (target.dataset.provider) {
@@ -1552,6 +1722,24 @@ function bindEvents() {
     if (target.hasAttribute("data-remove-question")) {
       syncResearchForm();
       state.quantQuestions.splice(Number(target.dataset.removeQuestion), 1);
+      render();
+    }
+    if (target.hasAttribute("data-add-quota")) {
+      syncResearchForm();
+      const dimension = state.quotaPlan.find((item) => item.id === target.dataset.addQuota);
+      if (dimension) dimension.items.push({ label: "新配额", pct: 0 });
+      render();
+    }
+    if (target.hasAttribute("data-remove-quota")) {
+      syncResearchForm();
+      const [dimensionId, index] = target.dataset.removeQuota.split(":");
+      const dimension = state.quotaPlan.find((item) => item.id === dimensionId);
+      if (dimension && dimension.items.length > 1) dimension.items.splice(Number(index), 1);
+      render();
+    }
+    if (action === "reset-quota") {
+      syncResearchForm();
+      state.quotaPlan = quotaFromAudienceConfig(state.audienceConfig);
       render();
     }
     if (action === "add-question") {
@@ -1610,8 +1798,9 @@ function bindEvents() {
   document.body.addEventListener("input", () => {
     if (state.page === "qual" || state.page === "quant") {
       syncResearchForm();
-      const button = document.querySelector("[data-action='generate']");
-      if (button) button.disabled = !hasResearchReady();
+      document.querySelectorAll("[data-action='generate'], [data-action='generate-mock']").forEach((button) => {
+        button.disabled = !hasResearchReady();
+      });
     }
     if (state.page === "settings") syncSettingsForm();
   });

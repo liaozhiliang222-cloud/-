@@ -439,6 +439,130 @@ button:disabled {
   line-height: 1.5;
 }
 
+.quota-designer {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.quota-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.quota-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.quota-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.quota-total {
+  min-width: 48px;
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: #fff5f5;
+  color: #c53030;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.quota-total.ok {
+  background: #eefaf2;
+  color: #1d7b3d;
+}
+
+.quota-items {
+  display: grid;
+  gap: 8px;
+}
+
+.quota-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 16px 32px;
+  gap: 6px;
+  align-items: center;
+}
+
+.quota-item input {
+  min-height: 34px;
+  font-size: 13px;
+  padding: 7px 8px;
+}
+
+.icon-button {
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.quota-alert,
+.quota-ok {
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.quota-alert {
+  color: #9a3412;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+}
+
+.quota-ok {
+  color: #166534;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+}
+
+.quota-result {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fbfcfe;
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.quota-result strong {
+  color: var(--ink);
+}
+
+.quota-result span {
+  color: #1d7b3d;
+  font-weight: 900;
+}
+
+.quota-result p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .tabs {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -910,6 +1034,8 @@ button:disabled {
   .analysis-grid,
   .export-grid,
   .audience-grid,
+  .quota-grid,
+  .quota-result,
   .segmented,
   .input-action,
   .api-grid,
