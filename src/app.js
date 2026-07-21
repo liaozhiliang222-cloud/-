@@ -1554,16 +1554,19 @@ function mergeQuantResults(parsed) {
 
     if (sq.type === "scale") {
       const scaleMax = parseInt(sq.scale?.split("-")[1] || "5");
-      const dist = r.dist || r.distribution || Array.from({ length: scaleMax }, () => Math.round(100 / scaleMax));
+      let dist = (r.dist || r.distribution || []).map((v) => (v == null ? 0 : Number(v) || 0));
+      // 补齐到 scaleMax 长度
+      while (dist.length < scaleMax) dist.push(0);
+      if (dist.length === 0) dist = Array.from({ length: scaleMax }, () => Math.round(100 / scaleMax));
       // 归一化分布到 100
       const distSum = dist.reduce((a, b) => a + b, 0);
-      const normalizedDist = distSum > 0 ? dist.map((v) => Math.round(v * 100 / distSum)) : dist;
+      const normalizedDist = distSum > 0 ? dist.map((v) => Math.round(v * 100 / distSum)) : Array.from({ length: scaleMax }, () => Math.round(100 / scaleMax));
       // 修正取整误差
       if (normalizedDist.length > 0) {
         const diff = 100 - normalizedDist.reduce((a, b) => a + b, 0);
         normalizedDist[normalizedDist.length - 1] += diff;
       }
-      const mean = r.mean != null ? Number(r.mean) : (dist.reduce((s, v, idx) => s + v * (idx + 1), 0) / 100);
+      const mean = r.mean != null ? Number(r.mean) : (normalizedDist.reduce((s, v, idx) => s + v * (idx + 1), 0) / 100);
       const sd = r.sd != null ? r.sd : "1.0";
       return { ...base, optionsArray: [], distribution: normalizedDist, mean: String(mean), sd: String(sd) };
     }
@@ -1571,14 +1574,15 @@ function mergeQuantResults(parsed) {
     if (sq.type === "matrix") {
       const rowNames = splitList(sq.rows);
       const mx = r.mx || r.matrix || [];
+      const scaleMax = parseInt(sq.scale?.split("-")[1] || "5");
       const matrix = rowNames.map((rowName, ri) => {
         const m = mx[ri] || {};
         const mean = m.m != null ? m.m : (m.mean != null ? m.mean : "3.0");
-        const d = m.d || m.distribution || [];
-        const scaleMax = parseInt(sq.scale?.split("-")[1] || "5");
-        const dist = d.length > 0 ? d : Array.from({ length: scaleMax }, () => Math.round(100 / scaleMax));
-        const distSum = dist.reduce((a, b) => a + b, 0);
-        const normalizedDist = distSum > 0 ? dist.map((v) => Math.round(v * 100 / distSum)) : dist;
+        let d = (m.d || m.distribution || []).map((v) => (v == null ? 0 : Number(v) || 0));
+        while (d.length < scaleMax) d.push(0);
+        if (d.length === 0) d = Array.from({ length: scaleMax }, () => Math.round(100 / scaleMax));
+        const distSum = d.reduce((a, b) => a + b, 0);
+        let normalizedDist = distSum > 0 ? d.map((v) => Math.round(v * 100 / distSum)) : Array.from({ length: scaleMax }, () => Math.round(100 / scaleMax));
         if (normalizedDist.length > 0) {
           const diff = 100 - normalizedDist.reduce((a, b) => a + b, 0);
           normalizedDist[normalizedDist.length - 1] += diff;
@@ -1590,12 +1594,19 @@ function mergeQuantResults(parsed) {
 
     // 单选/多选
     const opts = splitList(sq.options);
-    let values = r.v || r.values || opts.map(() => Math.round(100 / opts.length));
+    let values = (r.v || r.values || []).map((v) => (v == null ? 0 : Number(v) || 0));
+    // 补齐到与选项数量一致
+    while (values.length < opts.length) values.push(0);
+    if (values.length === 0) values = opts.map(() => Math.round(100 / opts.length));
     // 单选归一化到 100，多选不归一化
     if (sq.type === "single") {
       const sum = values.reduce((a, b) => a + b, 0);
       if (sum > 0 && sum !== 100) {
         values = values.map((v) => Math.round(v * 100 / sum));
+        const diff = 100 - values.reduce((a, b) => a + b, 0);
+        values[values.length - 1] += diff;
+      } else if (sum === 0) {
+        values = opts.map(() => Math.round(100 / opts.length));
         const diff = 100 - values.reduce((a, b) => a + b, 0);
         values[values.length - 1] += diff;
       }
