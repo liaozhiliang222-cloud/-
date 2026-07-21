@@ -317,6 +317,19 @@ function syncResearchForm() {
     scale: $(`#q-scale-${index}`)?.value || question.scale,
     rows: $(`#q-rows-${index}`)?.value || question.rows
   }));
+  // 自动补全空选项：single/multiple 题无选项时补占位，matrix 题无行维度时补占位
+  // 这样导入含价格测试/开放题/城市选择器等无选项题目的问卷后，生成结果不会失败
+  state.quantQuestions = state.quantQuestions.map((q) => {
+    const fixed = { ...q };
+    if ((q.type === "single" || q.type === "multiple") && !q.options.trim()) {
+      fixed.options = "选项1, 选项2, 选项3";
+    }
+    if (q.type === "matrix") {
+      if (!q.rows.trim()) fixed.rows = "维度1, 维度2, 维度3";
+      if (!q.options.trim()) fixed.options = "1, 2, 3, 4, 5";
+    }
+    return fixed;
+  });
 }
 
 function syncSettingsForm() {
@@ -332,11 +345,12 @@ function hasResearchReady() {
   if (state.mode === "qual") {
     return state.qualQuestions.every((q) => q.trim());
   }
+  // 放宽校验：只要求题干非空 + 至少 3 道题
+  // 选项为空的 single/multiple 题不阻塞（生成结果时自动补占位选项"选项1, 选项2..."）
+  // 矩阵题行维度为空时不阻塞（生成结果时自动补"维度1, 维度2..."）
+  // 这样导入含价格测试/开放题/城市选择器等无选项题目的问卷后，按钮仍可点击
   return state.quantQuestions.length >= 3 && state.quantQuestions.every((q) => {
     if (!q.text.trim()) return false;
-    if (q.type === "matrix") return q.rows.trim() && q.options.trim();
-    // 单选/多选题需要选项；量表题（scale）无需选项
-    if (q.type === "single" || q.type === "multiple") return q.options.trim();
     return true;
   });
 }
