@@ -315,16 +315,38 @@ function syncSettingsForm() {
 }
 
 function hasResearchReady() {
-  if (!state.topic.trim()) return false;
+  // 研究主题为空时，若已配置问卷题目，自动用首题文本兜底为主题（避免导入问卷后按钮无法点击）
+  if (!state.topic.trim()) {
+    const fallback = deriveTopicFromQuestions();
+    if (!fallback) return false;
+    state.topic = fallback;
+  }
   if (state.mode === "qual") {
     return state.qualQuestions.every((q) => q.trim());
   }
   return state.quantQuestions.length >= 3 && state.quantQuestions.every((q) => {
     if (!q.text.trim()) return false;
     if (q.type === "matrix") return q.rows.trim() && q.options.trim();
+    // 单选/多选题需要选项；量表题（scale）无需选项
     if (q.type === "single" || q.type === "multiple") return q.options.trim();
     return true;
   });
+}
+
+// 从问卷题目推导默认研究主题：取首题文本（去掉题号前缀、问号、编程说明，截断到 40 字）
+function deriveTopicFromQuestions() {
+  const qs = state.mode === "qual" ? state.qualQuestions : state.quantQuestions;
+  if (!qs || !qs.length) return "";
+  if (state.mode === "qual") {
+    return String(qs[0] || "").replace(/^\s*\d+\s*[.、):：]\s*/, "").slice(0, 40);
+  }
+  const first = qs[0];
+  if (!first || !first.text) return "";
+  let text = first.text;
+  text = text.replace(/^\s*[A-Za-z]?\d+[A-Za-z]?\d?\s*[.、):：]\s*/, "");
+  text = text.replace(/[？?]\s*$/, "");
+  text = text.replace(/【[^】]*】/g, "");
+  return text.trim().slice(0, 40);
 }
 
 function splitList(value) {
