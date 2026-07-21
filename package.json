@@ -7,8 +7,8 @@
     "dev": "node scripts/serve.mjs",
     "preview": "node scripts/serve.mjs",
     "build": "node scripts/build.mjs",
-    "deploy:cf": "wrangler pages deploy . --project-name=syn --branch=main",
-    "deploy:cf:preview": "wrangler pages deploy . --project-name=syn --branch=preview"
+    "deploy:cf": "wrangler pages deploy . --project-name=sym --branch=main",
+    "deploy:cf:preview": "wrangler pages deploy . --project-name=sym --branch=preview"
   },
   "dependencies": {},
   "devDependencies": {
