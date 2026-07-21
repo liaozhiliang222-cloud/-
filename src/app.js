@@ -329,8 +329,10 @@ function hasResearchReady() {
 
 function splitList(value) {
   return String(value || "")
+    // 保护 "其他，请说明" / "其它，请注明" 等作为一个完整选项，不被逗号拆分
+    .replace(/(其他|其它)，/g, "$1\x00")
     .split(/[,，、\n]/)
-    .map((item) => item.trim())
+    .map((item) => item.trim().replace(/\x00/g, "，"))
     .filter(Boolean);
 }
 
@@ -509,32 +511,322 @@ const QUESTION_TYPE_PATTERNS = [
   { re: /【矩阵(?:(\d+)分)?】/, type: "matrix" }
 ];
 
+// 问卷题量上限（与 UI 添加题目按钮、导入截断保持一致）
+const MAX_QUESTIONS = 80;
+
 function parseQuestionnaireText(text) {
   const lines = String(text || "")
     .split(/\r?\n+/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const questions = [];
+
+  // 多行分组：题干行 + 其后若干选项行，直到遇到下一道题干或分节/说明行
+  const groups = [];
+  let current = null;
   for (const line of lines) {
-    const q = parseQuestionLine(line);
-    if (q) questions.push(q);
+    if (isQuestionHeader(line)) {
+      if (current) groups.push(current);
+      current = { header: line, optionLines: [] };
+    } else if (isSectionHeader(line) || isInstructionLine(line)) {
+      // 分节标题 / 说明性段落：结束当前题目分组，后续行不再归入该题
+      if (current) { groups.push(current); current = null; }
+    } else if (current) {
+      current.optionLines.push(line);
+    }
+    // 第一个题干之前的所有行（前言、配额、问候等）因 current 仍为 null 被自动跳过
+  }
+  if (current) groups.push(current);
+
+  const questions = groups
+    .map((g) => parseQuestionGroup(g.header, g.optionLines))
+    .filter(Boolean);
+
+  // 子题共享选项补全（如价格测试 C5a/C5b/C5c/C5d 共用同一组价格选项；
+  // 以及 B9/B10 "最喜欢/其次喜欢" 共用同一组颜色选项但题号前缀不同的情况）
+  inheritSharedOptions(questions);
+
+  // 统一把开放题（open）映射为 single（UI/mock 生成器仅支持 single/multiple/scale/matrix）
+  for (const q of questions) {
+    if (q.type === "open") q.type = "single";
   }
   return questions;
 }
 
-function parseQuestionLine(line) {
-  // 1. 去掉题号前缀：支持 Q1. / 1. / 1、 / 1) / 1： / 1* / 4-1* / 27-2 / FZ_Q4_1 / Q27_2__1__open 等
-  //    题号后允许接标点或空白；(?:__\w+)? 用于兼容 Q27_2__1__open 这种带开放字段后缀的题号
-  let rest = line
-    .replace(/^\s*(?:Q?\d+(?:[-_]\d+)*(?:__\w+)?\*?|[A-Za-z]+_?Q?\d+(?:[_\d]*\*?))(?:\s*[.、):：]\s*|\s+)/, "")
-    .trim();
-  // 兜底：纯数字 + 标点
-  if (rest === line.trim()) {
-    rest = line.replace(/^\s*\d+\s*[.、):：]\s*/, "").trim();
-  }
+// 判断一行是否为题干：含明确题型标记，或 字母题号前缀，或 纯数字题号+问号
+function isQuestionHeader(line) {
+  if (!line) return false;
+  // 题型标记同时兼容 【...】 与 （...），且允许括号内题型词后还有附加说明（如"多选，最多选5项"）
+  // 支持：单选/多选/可多选/排序/填空/开放题/量表N分/矩阵N分 等
+  const hasTypeMarker =
+    /[（(]\s*(单选|多选|可多选|多选题|单选题|横向单选|开放题|问答题|填空|排序|量表\d*分?|矩阵\d*分?)[^）)]*[）)]/.test(line) ||
+    /【(单选|多选|排序|量表\d*分?|矩阵\d*分?)】/.test(line);
+  // 跳过纯系统逻辑/编程说明行（如 S4T：配额归类逻辑、S6T 用户类型归类）——但含题型标记的真正题目不跳过
+  if (!hasTypeMarker && /系统自动|配额归类|用户类型归类|无需被访者|程序员注意/.test(line)) return false;
+  // 字母题号前缀：S1. / C2a. / FZS4. / B16a. / A12a：等（题号列强信号，选项行是纯数字前缀不会误匹配）
+  const hasLetterCodePrefix =
+    /^[A-Za-z]+\d+[A-Za-z]?\d?\s*[.、):：]/.test(line) || /^[A-Za-z]+\d+[A-Za-z]?\d?\s+\S/.test(line);
+  const hasDigitPrefix = /^\d+\s*[.、):：]/.test(line);
+  const hasQuestionMark = /[？?]/.test(line);
+  // 强信号 1：任意位置出现题型标记
+  if (hasTypeMarker) return true;
+  // 强信号 2：字母题号前缀（Excel 题号列直接表明这是题目，如 B11. 请您为这款产品拟定四个价格：）
+  if (hasLetterCodePrefix) return true;
+  // 纯数字题号 + 问号
+  if (hasDigitPrefix && hasQuestionMark) return true;
+  return false;
+}
+
+// 分节标题：S 甄别部分 / A 部分：... / D 背景信息 等（不作为题目，也不作为选项）
+function isSectionHeader(line) {
+  if (!line) return false;
+  if (/部分/.test(line) && !/^\d/.test(line)) return true;
+  if (/^[A-Z]\s+[\u4e00-\u9fa5]/.test(line)) return true; // "S 甄别部分" / "D 背景信息"
+  if (/^[A-Z][\u4e00-\u9fa5]/.test(line) && !/\d/.test(line)) return true; // "P两轮车使用概况..."
+  if (/您好|感谢参与|感谢您的宝贵时间|问卷到此结束|样本量|被访者要求|配额设计|人群维度|用户类型维度|合计/.test(line)) return true;
+  return false;
+}
+
+// 说明性 / 描述性段落：概念描述、研究说明、时间计划表头等（不作为选项）
+function isInstructionLine(line) {
+  if (!line) return false;
+  if (/请先阅读|概念描述|我们正在开发|图片如下|【需要|注[:：]|说明[:：]|序号|工作项|产出物|调研计划确定|问卷设计与确认|确定概念描述|问卷编程|问卷投放|数据清洗|报告撰写|系统自动|配额归类|用户类型归类|无需被访者/.test(line)) return true;
+  // 过长且不含问号、不含题型标记 → 视为说明段落
+  if (line.length > 80 && !/[？?]/.test(line) && !/[（(]\s*(单选|多选|可多选|量表|矩阵)/.test(line)) return true;
+  return false;
+}
+
+// 解析一个题干 + 若干选项行，返回 { code, text, type, options, scale, rows }
+function parseQuestionGroup(header, optionLines) {
+  const codeMatch = header.match(/^[A-Za-z]+\d+[A-Za-z]?\d?|^[A-Za-z]+_?Q?\d+[A-Za-z0-9_]*|^Q?\d+(?:[-_]\d+)*/);
+  const code = codeMatch ? codeMatch[0] : "";
+
+  const rest = stripQuestionNumberPrefix(header);
   if (!rest) return null;
 
-  // 2. 识别题型标记 【单选】【多选】【量表5分】【矩阵10分】等
+  // 优先匹配 【...】 标记（旧格式），再匹配 （...） 标记（Word 文档常见格式）
+  // 支持题型：单选/多选/可多选/排序/填空/开放题/量表N分/矩阵N分 等
+  const bracket = rest.match(/【(单选|多选|排序|量表(\d*)分?|矩阵(\d*)分?)】/);
+  const paren = rest.match(/[（(]\s*(单选|多选|可多选|多选题|单选题|横向单选|开放题|问答题|填空|排序|量表(\d*)分?|矩阵(\d*)分?)[^）)]*[）)]/);
+
+  let type = "single";
+  let scale = "1-5";
+  let questionText = rest;
+  let afterMarker = "";
+
+  const marker = bracket || paren;
+  if (marker) {
+    const markerText = marker[0];
+    const label = marker[1];
+    const num = marker[2] || marker[3];
+    const mapped = normalizeQuestionType(label, num);
+    type = mapped.type;
+    if (mapped.scale) scale = mapped.scale;
+    const idx = rest.indexOf(markerText);
+    questionText = rest.substring(0, idx);
+    afterMarker = rest.substring(idx + markerText.length);
+  }
+
+  // 兜底：题干含 "0-10分打分/评分" 等 → 识别为量表题（即使已识别为单选也覆盖）
+  // （Excel 中常见 B1/B5/B6/B7 "请用0-10分打分..." 这类评分题，标记是（单选）但本质是量表）
+  // 用 1-10 量表（与 UI/mock 生成器的 1-10 分支对齐）
+  if (type === "single" && /0-\s*10\s*分.*(?:打分|评分)|(?:打分|评分).*0-\s*10\s*分/.test(rest)) {
+    type = "scale";
+    scale = "1-10";
+  }
+
+  // 清理题干与标记后残留中的编程说明 【针对...】【仅...】【程序员注意：...】【终止访问】等
+  // （如 S3 "（单选）【程序员注意：针对S2...】" 中标记后的整段【...】说明不应被当作选项）
+  questionText = stripProgrammerNotes(questionText).replace(/\s+/g, " ").trim();
+  if (!questionText) return null;
+  afterMarker = stripProgrammerNotes(afterMarker);
+
+  let options = "";
+  let rows = "";
+
+  // 单行格式：标记后还残留带分隔符的选项文本（如 Q1. ...【单选】A / B / C）
+  const inlineHasOptions = afterMarker && /[\/,，、|]/.test(afterMarker);
+
+  if (type === "matrix") {
+    if (inlineHasOptions) {
+      rows = splitOptions(afterMarker.replace(/\s*[/／]\s*/g, ", ")).join(", ");
+    } else {
+      const { scaleOpts, rowList } = parseMatrixOptionLines(optionLines);
+      if (scaleOpts) options = scaleOpts;
+      rows = rowList.join(", ");
+    }
+    if (!options) {
+      options = scale === "1-10" ? "1, 2, 3, 4, 5, 6, 7, 8, 9, 10" : scale === "1-7" ? "1, 2, 3, 4, 5, 6, 7" : "1, 2, 3, 4, 5";
+    }
+  } else if (type === "scale") {
+    options = "";
+  } else {
+    // single / multiple / open
+    if (inlineHasOptions) {
+      options = splitOptions(afterMarker.replace(/\s*[/／]\s*/g, ", ")).join(", ");
+    } else {
+      options = optionLines
+        .map(stripOptionPrefix)
+        .map((t) => stripProgrammerNotes(t))
+        .map(sanitizeOptionText)
+        .filter((t) => t && !/^[（(].*[）)]$/.test(t)) // 过滤掉仅剩括号说明的行
+        .filter(Boolean)
+        .join(", ");
+    }
+  }
+
+  // 返回原始 type（含 "open"），open→single 的映射放到 inheritSharedOptions 之后统一处理
+  // 这样 inheritSharedOptions 能区分开放题（不继承选项）与单选/多选（缺选项时继承）
+  return { code, text: questionText, type, options, scale, rows };
+}
+
+// 矩阵题选项行解析：识别 "选项：1.必须要有 2.最好要有..." 为刻度，"功能列表：" 之后为行维度
+function parseMatrixOptionLines(optionLines) {
+  let scaleOpts = "";
+  const rowList = [];
+  let inRows = false;
+  for (const line of optionLines) {
+    const cleaned = stripProgrammerNotes(stripOptionPrefix(line));
+    if (!cleaned) continue;
+    // "选项：1.xxx 2.xxx ..." → 刻度
+    if (/^选项\s*[：:]/.test(cleaned) || /^选项[:：]/.test(cleaned)) {
+      const points = cleaned
+        .replace(/^选项\s*[：:]\s*/, "")
+        .split(/\s*(?=\d+[.、)])/)
+        .map((s) => stripOptionPrefix(s).trim())
+        .filter(Boolean);
+      if (points.length) scaleOpts = points.map(sanitizeOptionText).join(", ");
+      continue;
+    }
+    // "功能列表：" / "维度：" 标记 → 之后的行均为矩阵行
+    if (/功能列表|维度列表|评价维度|功能维度/.test(cleaned)) {
+      inRows = true;
+      continue;
+    }
+    rowList.push(sanitizeOptionText(cleaned));
+    inRows = true;
+  }
+  return { scaleOpts, rowList };
+}
+
+// 子题共享选项：若某题无选项，则尝试从后续题目继承
+// 优先级 1：同前缀（如 C5）的后续题（C5a←C5b←C5c←C5d 共用价格选项）
+// 优先级 2：紧邻的下一题（如 B9←B10 "最喜欢/其次喜欢" 共用颜色选项，但题号前缀不同）
+// 仅对 single/multiple 生效；scale/matrix/open 不继承（open 后续统一映射为 single 时也保持空选项）
+function inheritSharedOptions(questions) {
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    if (q.options) continue;
+    if (q.type !== "single" && q.type !== "multiple") continue; // scale/matrix/open 不继承
+
+    // 优先级 1：同前缀后续题
+    const myPrefix = (q.code || "").match(/^[A-Za-z]+\d+/);
+    if (myPrefix) {
+      let found = false;
+      for (let j = i + 1; j < questions.length; j++) {
+        const nq = questions[j];
+        const nextPrefix = (nq.code || "").match(/^[A-Za-z]+\d+/);
+        if (!nextPrefix || nextPrefix[0] !== myPrefix[0]) break;
+        if (nq.options) {
+          q.options = nq.options;
+          if (nq.type === "single" || nq.type === "multiple") q.type = nq.type;
+          found = true;
+          break;
+        }
+      }
+      if (found) continue;
+    }
+
+    // 优先级 2：紧邻下一题（前缀不同但同分节字母、同题型，且下一题有选项）
+    // 例：B9/B10 "最喜欢/其次喜欢" 共用颜色选项（同为 B 段、同为单选）
+    // 防止误继承：T5(城市)←FZT5(城市级别) 会被分节字母不同(T≠F)挡住；
+    //             A6(多选)←A7(单选) 会被题型不同挡住
+    const next = questions[i + 1];
+    const mySec = (q.code || "").match(/^[A-Za-z]+/);
+    const nextSec = next && (next.code || "").match(/^[A-Za-z]+/);
+    if (
+      next && next.options &&
+      next.type === q.type &&
+      mySec && nextSec && mySec[0] === nextSec[0]
+    ) {
+      q.options = next.options;
+    }
+  }
+}
+
+// 去掉题号前缀：兼容 S1. / C2a. / S4T： / Q1. / 1. / 1* / 4-1* / 27-2 / FZ_Q4_1 / Q27_2__1__open 等
+// 题号后允许接标点或空白（如 "1* 您的性别"、"S1 您的年龄"）
+function stripQuestionNumberPrefix(line) {
+  const sep = "(?:\\s*[.、):：]\\s*|\\s+)";
+  const patterns = [
+    new RegExp(`^[A-Za-z]+\\d+[A-Za-z]?\\d?${sep}`),                   // S1. C2a. S4T： S1<空格>
+    new RegExp(`^[A-Za-z]+_?Q?\\d+[A-Za-z0-9_]*\\*?${sep}`),           // FZ_Q4_1. Q27_2__1__open.
+    new RegExp(`^Q?\\d+(?:[-_]\\d+)*(?:__\\w+)?\\*?${sep}`),            // Q1. 1. 4-1* 27-2 1*
+    /^Q?\d+(?:[-_]\d+)*(?:__\w+)?\*?\s*[.、):：]\s*/,                    // 纯数字 + 标点兜底
+    /^\d+\s*[.、):：]\s*/                                                // 纯数字 + 标点兜底2
+  ];
+  for (const p of patterns) {
+    const m = line.match(p);
+    if (m) return line.substring(m[0].length).trim();
+  }
+  return line.trim();
+}
+
+// 去掉选项行的 "1. " / "1、" / "1) " 前缀（保留以数字开头的选项文本，如 1,500元、1台）
+function stripOptionPrefix(line) {
+  return String(line || "").replace(/^\s*\d+\s*[.、):：]\s*/, "").trim();
+}
+
+// 去掉问卷编程说明 【针对S2=1询问】【仅S5选6者回答】【程序员注意：...】【终止访问】【需要研极提供...】等
+// 以及圆括号形式的出示/询问条件（如 （仅S6T=1现有用户出示）（针对S2=1询问））
+function stripProgrammerNotes(text) {
+  return String(text || "")
+    // 去掉编程说明 【针对S2=1询问】【仅S5选6者回答】【程序员注意：...】【终止访问】【需要研极提供...】等
+    .replace(/【[^】]*?(针对|仅|程序员|终止访问|需要|出示|呈现|若选|当选|跳问|逻辑|后台自动|随机)[^】]*?】/g, "")
+    .replace(/【[^】]*?(归类|配额|系统自动|无需)[^】]*?】/g, "")
+    // 去掉圆括号形式的出示/询问条件（如 （仅S6T=1现有用户出示）（针对S2=1询问））
+    .replace(/[（(][^）)]*?(出示|询问|针对S\d|仅S\d)[^）)]*?[）)]/g, "")
+    // 注意：保留 【插入A7选项】【插入B16排序第一选项】等内容占位符（属题干内容，非编程说明）
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// 规整选项文本：保护 "其他，请说明" / 去掉数字千分位逗号 / 其余逗号转空格 / 去掉填空下划线
+// 目的是避免后续 splitList 按 [,，、] 切分时把含逗号的选项拆开
+function sanitizeOptionText(text) {
+  return String(text || "")
+    .replace(/(其他|其它)，/g, "$1\x00") // 临时保护 "其他，"
+    .replace(/(\d),(\d{3})/g, "$1$2")      // 1,500 → 1500
+    .replace(/[，、]/g, " ")                 // 中文逗号/顿号 → 空格
+    .replace(/,/g, " ")                      // 其余 ASCII 逗号 → 空格
+    .replace(/\x00/g, "，")                  // 恢复 "其他，"
+    .replace(/[：:]\s*_{2,}\s*[^，,）)\n]*/g, "") // ：______ / ：____岁 → ""
+    .replace(/_{2,}/g, "")                        // 独立 ____ → ""
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// 把各种题型写法映射为 single/multiple/scale/matrix/open
+// 注：排序题（rank）映射为 multiple（多选+排序），保持与 UI/mock 生成器兼容
+function normalizeQuestionType(label, num) {
+  const l = String(label || "").trim();
+  if (/矩阵|横向|matrix/i.test(l)) {
+    return { type: "matrix", scale: num ? `1-${num}` : "1-5" };
+  }
+  if (/量表|scale|打分|评分/i.test(l)) {
+    return { type: "scale", scale: num ? `1-${num}` : "1-5" };
+  }
+  if (/排序|rank/i.test(l)) return { type: "multiple" };
+  if (/多选|multiple|checkbox/i.test(l)) return { type: "multiple" };
+  if (/单选|single/i.test(l)) return { type: "single" };
+  if (/开放|问答|填空|open/i.test(l)) return { type: "open" };
+  return { type: "single" };
+}
+
+// 单行格式兜底解析（整道题在一行内：题号 + 题干 + 标记 + 选项）
+function parseQuestionLine(line) {
+  const rest = stripQuestionNumberPrefix(line);
+  if (!rest) return null;
+
   let type = "single";
   let scale = "1-5";
   let options = "";
@@ -542,17 +834,30 @@ function parseQuestionLine(line) {
   let questionText = rest;
   let matchedMarker = null;
 
-  for (const pattern of QUESTION_TYPE_PATTERNS) {
-    const m = rest.match(pattern.re);
+  // 同时识别 【...】 与 （...） 题型标记，括号内题型词后允许附加说明（如"多选，最多选5项"）
+  const allMarkers = [
+    { re: /[（(]\s*(单选)[^）)]*[）)]/, t: "single" },
+    { re: /[（(]\s*(多选|可多选|多选题)[^）)]*[）)]/, t: "multiple" },
+    { re: /[（(]\s*(开放题|问答题|填空)[^）)]*[）)]/, t: "open" },
+    { re: /[（(]\s*横向单选[^）)]*[）)]/, t: "matrix" },
+    { re: /【(单选)】/, t: "single" },
+    { re: /【(多选)】/, t: "multiple" },
+    { re: /【量表(?:(\d+)分)?】/, t: "scale" },
+    { re: /【矩阵(?:(\d+)分)?】/, t: "matrix" },
+    { re: /[（(]\s*量表(?:(\d*)分?)?[^）)]*[）)]/, t: "scale" },
+    { re: /[（(]\s*矩阵(?:(\d*)分?)?[^）)]*[）)]/, t: "matrix" }
+  ];
+  let scaleNum = null;
+  for (const p of allMarkers) {
+    const m = rest.match(p.re);
     if (m) {
-      type = pattern.type;
+      type = p.t;
       matchedMarker = m[0];
-      if (m[1] && (pattern.type === "scale" || pattern.type === "matrix")) {
-        scale = `1-${m[1]}`;
-      }
+      if (m[1] && (p.t === "scale" || p.t === "matrix")) scaleNum = m[1];
       break;
     }
   }
+  if (scaleNum) scale = `1-${scaleNum}`;
 
   if (matchedMarker) {
     const markerIdx = rest.indexOf(matchedMarker);
@@ -560,29 +865,27 @@ function parseQuestionLine(line) {
     const after = rest.substring(markerIdx + matchedMarker.length).trim();
     const normalized = after.replace(/\s*[/／]\s*/g, ", ");
     if (type === "matrix") {
-      // 矩阵题：后面的内容是评价维度（行），选项为量表刻度
       rows = splitOptions(normalized).join(", ");
       options = scale === "1-10" ? "1, 2, 3, 4, 5, 6, 7, 8, 9, 10" : "1, 2, 3, 4, 5";
     } else if (type === "single" || type === "multiple") {
       options = splitOptions(normalized).join(", ");
     }
-    // 量表题不需要 options
   } else {
-    // 3. 无题型标记：尝试从问号后的选项列表推断单选题
+    // 无题型标记：尝试从问号后的选项列表推断单选题
     const m = rest.match(/^(.+?[？?])\s*[:：]?\s*(.+)$/);
     if (m && /[\/,，、]/.test(m[2]) && m[2].length < 120) {
       questionText = m[1].trim();
       options = splitOptions(m[2].replace(/\s*[/／]\s*/g, ", ")).join(", ");
       type = "single";
     } else {
-      // 兜底：作为单选开放题保留
       questionText = rest;
       type = "single";
     }
   }
 
+  questionText = stripProgrammerNotes(questionText);
   if (!questionText) return null;
-  return { text: questionText, type, options, scale, rows };
+  return { code: "", text: questionText, type: type === "open" ? "single" : type, options, scale, rows };
 }
 
 // 把 "其他，请说明" / "其它，请注明" 等作为单一选项保留，不再按逗号切分
@@ -603,10 +906,11 @@ function importQuestionnaire() {
     toast("未能识别出 3 道以上题目，请检查格式");
     return;
   }
-  // 上限 8 道题（与 UI 一致）
-  state.quantQuestions = parsed.slice(0, 8);
+  state.quantQuestions = parsed.slice(0, MAX_QUESTIONS).map((q) => ({
+    text: q.text, type: q.type, options: q.options, scale: q.scale, rows: q.rows
+  }));
   state.quantInputMode = "manual";
-  toast(`已识别 ${parsed.length} 道题目${parsed.length > 8 ? "（已截取前 8 道）" : ""}`);
+  toast(`已识别 ${parsed.length} 道题目${parsed.length > MAX_QUESTIONS ? `（已截取前 ${MAX_QUESTIONS} 道）` : ""}`);
   render();
 }
 
@@ -682,20 +986,25 @@ async function extractXlsxText(file) {
     throw new Error("文档格式异常：未在 .xlsx 中找到 xl/worksheets/sheetN.xml，请确认文件未损坏");
   }
 
-  // 3. 解析第一个有内容的 sheet
+  // 3. 遍历所有 sheet，收集每个问卷 sheet 的文本（合并 S/A/B/T 等多个部分）
+  //    非问卷 sheet（配额设计、问卷框架等）会因 buildQuestionnaireTextFromXlsxRows 找不到
+  //    "题号 + 题干及选项" 表头而返回空字符串，自动跳过
+  const allText = [];
   for (const sheetEntry of sheetEntries) {
     const sheetBytes = await inflateEntry(bytes, sheetEntry);
     const sheetXml = new TextDecoder("utf-8").decode(sheetBytes);
-    if (!sheetXml.includes("<row") && !sheetXml.includes("<c ")) {
-      continue;
-    }
+    if (!sheetXml.includes("<row") && !sheetXml.includes("<c ")) continue;
     const rows = extractXlsxRows(sheetXml, sharedStrings);
     if (rows.length === 0) continue;
     const text = buildQuestionnaireTextFromXlsxRows(rows);
-    if (text.trim()) return text;
+    if (text.trim()) allText.push(text);
   }
 
-  throw new Error("Excel 文档为空或无有效问卷行，请确认包含问卷题目");
+  if (allText.length === 0) {
+    throw new Error("Excel 文档为空或无有效问卷行，请确认包含问卷题目");
+  }
+  // 多个 sheet 之间用分节标记分隔，确保 parseQuestionnaireText 能正确分组
+  return allText.join("\n\n部分\n\n");
 }
 
 // 解析 sharedStrings.xml：每个 <si> 是一个字符串项，可能包含多个 <r><t> 富文本
@@ -763,52 +1072,55 @@ function extractXlsxRows(sheetXml, sharedStrings) {
   return rows;
 }
 
-// 智能拼接：识别 题号 / 题目内容 / 题型 / 选项 列，按 parseQuestionnaireText 友好格式拼接
+// 智能拼接：识别 "题号 + 题干及选项" 表头，按行结构输出 parseQuestionnaireText 友好的文本
+// 规则：字母题号（S1/A1/B1/FZS4...）→ 题干行；纯数字题号（1/2/97/99）+ 题干非空 → 选项行；
+//       纯数字 ≥100 或题干为空 → 编程参考号，跳过；题号为空但有文字 → 段落说明，跳过
 function buildQuestionnaireTextFromXlsxRows(rows) {
   if (!rows.length) return "";
 
-  // 1. 尝试识别表头列
-  const header = rows[0].map((h) => String(h || "").trim());
-  const findCol = (keywords) => header.findIndex((h) => keywords.some((k) => h.includes(k)));
-  const idIdx = findCol(["题号", "题目编号", "question id", "q id", "q编号"]);
-  const textIdx = findCol(["题目内容", "题干", "question", "题目"]);
-  const typeIdx = findCol(["题型", "题目类型", "type"]);
-  const optionsIdx = findCol(["选项", "options", "答案选项"]);
+  // 1. 在前 6 行中查找表头：同时含 "题号" 和 ("题干及选项" 或 "题干") 的行
+  let headerIdx = -1, idCol = -1, textCol = -1;
+  for (let i = 0; i < Math.min(rows.length, 6); i++) {
+    const cells = rows[i].map((c) => String(c || "").trim());
+    const ti = cells.findIndex((c) => c.includes("题号") || c.includes("题目编号") || /question\s*id/i.test(c));
+    const tx = cells.findIndex((c) => c.includes("题干及选项") || c.includes("题干") || c.includes("题目内容"));
+    if (ti >= 0 && tx >= 0 && ti !== tx) {
+      headerIdx = i; idCol = ti; textCol = tx; break;
+    }
+  }
 
-  // 2. 无表头识别：每行所有非空 cell 用空格拼接（兼容简单的"题号 + 题目"两列结构）
-  if (idIdx < 0 && textIdx < 0) {
+  // 2. 无问卷表头：回退到逐行拼接（兼容简单的"题号 + 题目"两列结构）
+  if (headerIdx < 0) {
     return rows
       .map((r) => r.filter((c) => String(c || "").trim()).join(" "))
       .filter((line) => line.trim())
       .join("\n");
   }
 
-  // 3. 有表头：从第二行开始按列结构拼接
+  // 3. 按列结构拼接：题号字母开头 → 题干行；题号为纯数字 → 选项行；其余跳过
   const lines = [];
-  for (let i = 1; i < rows.length; i++) {
+  for (let i = headerIdx + 1; i < rows.length; i++) {
     const row = rows[i];
-    if (!row.some((c) => String(c || "").trim())) continue;
+    const id = String(row[idCol] || "").trim();
+    const text = String(row[textCol] || "").trim();
+    if (!id && !text) continue; // 空行
 
-    const parts = [];
-    if (idIdx >= 0 && row[idIdx]) {
-      const id = String(row[idIdx]).trim();
-      // 标准化为 "Q1." 前缀，方便 parseQuestionLine 剥离
-      parts.push(/^Q?[\dA-Za-z]/.test(id) ? `${id}.` : id);
+    if (/^[A-Za-z]/.test(id)) {
+      // 题干行：字母题号（S1 / A12a / FZS4 / B16a 等）
+      // 保留题干中的 （单选）/（多选）/（排序）等标记，parseQuestionnaireText 会识别
+      lines.push(`${id}. ${text}`);
+    } else if (/^\d+$/.test(id)) {
+      const num = Number(id);
+      // 编程参考号（142/199/263/369/434-459 等大数字）→ 跳过
+      if (num >= 100) continue;
+      // 题干为空的纯数字行（孤立编程号）→ 跳过
+      if (!text) continue;
+      // 选项行：1/2/.../97/99
+      lines.push(`${id}. ${text}`);
+    } else {
+      // 题号为其它文字或空、但有正文 → 段落说明/分节介绍，跳过（避免污染上一题选项）
+      continue;
     }
-    if (textIdx >= 0 && row[textIdx]) {
-      parts.push(String(row[textIdx]).trim());
-    }
-    const typeStr = typeIdx >= 0 ? String(row[typeIdx] || "").trim() : "";
-    const optionsStr = optionsIdx >= 0 ? String(row[optionsIdx] || "").trim() : "";
-    if (typeStr) {
-      // 标准化题型：单选题 → 单选；多选题 → 多选；量表题 → 量表10分（如果带分值则用分值）
-      const normalizedType = normalizeXlsxType(typeStr);
-      if (normalizedType) parts.push(`【${normalizedType}】`);
-    }
-    if (optionsStr) parts.push(optionsStr);
-
-    const line = parts.join(" ").trim();
-    if (line) lines.push(line);
   }
   return lines.join("\n");
 }
@@ -1002,11 +1314,13 @@ async function importQuestionnaireFile(file) {
       toast("已读取文档，但未识别出 3 道以上题目，请检查文本");
       return;
     }
-    state.quantQuestions = parsed.slice(0, 8);
+    state.quantQuestions = parsed.slice(0, MAX_QUESTIONS).map((q) => ({
+      text: q.text, type: q.type, options: q.options, scale: q.scale, rows: q.rows
+    }));
     state.quantInputMode = "manual";
     state.isImportingDocx = false;
     const label = file.name.toLowerCase().endsWith(".xlsx") ? "Excel" : "Word";
-    toast(`已从 ${label} 识别 ${parsed.length} 道题目${parsed.length > 8 ? "（已截取前 8 道）" : ""}`);
+    toast(`已从 ${label} 识别 ${parsed.length} 道题目${parsed.length > MAX_QUESTIONS ? `（已截取前 ${MAX_QUESTIONS} 道）` : ""}`);
     render();
   } catch (error) {
     state.isImportingDocx = false;
@@ -1992,7 +2306,7 @@ function QuantQuestionForm() {
             ${QuantQuestionConfig(question, index)}
           </div>
         `).join("")}
-        <button class="ghost" data-action="add-question" ${state.quantQuestions.length >= 8 ? "disabled" : ""}>添加题目</button>
+        <button class="ghost" data-action="add-question" ${state.quantQuestions.length >= MAX_QUESTIONS ? "disabled" : ""}>添加题目</button>
         <div class="notice">AI 会根据人群画像生成合理的统计分布，用于研究设计与假设预验证。</div>
       `}
     </div>
