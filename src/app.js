@@ -1,8 +1,15 @@
 const MODEL_CONFIG = {
   kimi: { name: "Kimi", key: "synthuser_api_key_kimi", placeholder: "sk-...", model: "moonshot-v1-8k", baseUrl: "https://api.moonshot.cn/v1/chat/completions" },
   deepseek: { name: "DeepSeek", key: "synthuser_api_key_deepseek", placeholder: "sk-...", model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1/chat/completions" },
-  zhipu: { name: "智谱 GLM", key: "synthuser_api_key_zhipu", placeholder: "请输入 GLM API Key", model: "glm-4", baseUrl: "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
+  zhipu: { name: "智谱 GLM", key: "synthuser_api_key_zhipu", placeholder: "请输入 GLM API Key", model: "glm-4-flash", baseUrl: "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
   custom: { name: "自定义模型", key: "synthuser_api_key_custom", placeholder: "兼容 OpenAI 格式的 API Key", model: "your-model-name", baseUrl: "" }
+};
+
+// 内置默认 API Key：首次访问时若用户未保存自己的 Key，则自动使用，开箱即用。
+// 用户在「模型设置」中保存自己的 Key 后会覆盖默认值。
+// 注意：内置 Key 部署到公网后会被访问者看到，仅适用于免费额度 / 测试场景，正式生产请替换为用户自有的 Key。
+const DEFAULT_PROVIDER_KEYS = {
+  zhipu: "bb32a87bafb94891a4aab4eeff9b48b4.L5NZNKkIWgWWUMRS"
 };
 
 const GENERATION_TIMEOUT_MS = 90000;
@@ -114,7 +121,7 @@ const state = {
     { id: "age", name: "年龄", items: [{ label: "25-29 岁", pct: 45 }, { label: "30-34 岁", pct: 35 }, { label: "35-40 岁", pct: 20 }] },
     { id: "city", name: "城市层级", items: [{ label: "一线城市", pct: 45 }, { label: "新一线城市", pct: 40 }, { label: "二线城市", pct: 15 }] }
   ],
-  provider: localStorage.getItem("synthuser_provider") || "kimi",
+  provider: localStorage.getItem("synthuser_provider") || "zhipu",
   apiKey: "",
   showKey: false,
   customBaseUrl: localStorage.getItem("synthuser_custom_base_url") || "",
@@ -148,7 +155,9 @@ const state = {
   isStandalone: window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true,
   isOnline: navigator.onLine,
   toast: "",
-  abortController: null
+  abortController: null,
+  isImportingDocx: false,
+  importError: ""
 };
 
 const initialMode = new URLSearchParams(window.location.search).get("mode");
@@ -160,7 +169,14 @@ if (initialMode === "quant" || initialMode === "qual") {
 const $ = (selector) => document.querySelector(selector);
 
 function getSavedKey(provider = state.provider) {
-  return localStorage.getItem(MODEL_CONFIG[provider].key) || "";
+  const saved = localStorage.getItem(MODEL_CONFIG[provider].key);
+  if (saved) return saved;
+  // 用户未保存自己的 Key 时回退到内置默认 Key（开箱即用）
+  return DEFAULT_PROVIDER_KEYS[provider] || "";
+}
+
+function isUsingDefaultKey(provider = state.provider) {
+  return !localStorage.getItem(MODEL_CONFIG[provider].key) && !!DEFAULT_PROVIDER_KEYS[provider];
 }
 
 function validateKeyFormat(key, provider) {
@@ -465,6 +481,521 @@ function importOutline() {
   render();
 }
 
+// ===== 问卷文本解析 =====
+
+const QUESTION_TYPE_PATTERNS = [
+  { re: /【(单选)】/, type: "single" },
+  { re: /【(多选)】/, type: "multiple" },
+  { re: /【量表(?:(\d+)分)?】/, type: "scale" },
+  { re: /【矩阵(?:(\d+)分)?】/, type: "matrix" }
+];
+
+function parseQuestionnaireText(text) {
+  const lines = String(text || "")
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const questions = [];
+  for (const line of lines) {
+    const q = parseQuestionLine(line);
+    if (q) questions.push(q);
+  }
+  return questions;
+}
+
+function parseQuestionLine(line) {
+  // 1. 去掉题号前缀：支持 Q1. / 1. / 1、 / 1) / 1： / 1* / 4-1* / 27-2 / FZ_Q4_1 / Q27_2__1__open 等
+  //    题号后允许接标点或空白；(?:__\w+)? 用于兼容 Q27_2__1__open 这种带开放字段后缀的题号
+  let rest = line
+    .replace(/^\s*(?:Q?\d+(?:[-_]\d+)*(?:__\w+)?\*?|[A-Za-z]+_?Q?\d+(?:[_\d]*\*?))(?:\s*[.、):：]\s*|\s+)/, "")
+    .trim();
+  // 兜底：纯数字 + 标点
+  if (rest === line.trim()) {
+    rest = line.replace(/^\s*\d+\s*[.、):：]\s*/, "").trim();
+  }
+  if (!rest) return null;
+
+  // 2. 识别题型标记 【单选】【多选】【量表5分】【矩阵10分】等
+  let type = "single";
+  let scale = "1-5";
+  let options = "";
+  let rows = "";
+  let questionText = rest;
+  let matchedMarker = null;
+
+  for (const pattern of QUESTION_TYPE_PATTERNS) {
+    const m = rest.match(pattern.re);
+    if (m) {
+      type = pattern.type;
+      matchedMarker = m[0];
+      if (m[1] && (pattern.type === "scale" || pattern.type === "matrix")) {
+        scale = `1-${m[1]}`;
+      }
+      break;
+    }
+  }
+
+  if (matchedMarker) {
+    const markerIdx = rest.indexOf(matchedMarker);
+    questionText = rest.substring(0, markerIdx).trim();
+    const after = rest.substring(markerIdx + matchedMarker.length).trim();
+    const normalized = after.replace(/\s*[/／]\s*/g, ", ");
+    if (type === "matrix") {
+      // 矩阵题：后面的内容是评价维度（行），选项为量表刻度
+      rows = splitOptions(normalized).join(", ");
+      options = scale === "1-10" ? "1, 2, 3, 4, 5, 6, 7, 8, 9, 10" : "1, 2, 3, 4, 5";
+    } else if (type === "single" || type === "multiple") {
+      options = splitOptions(normalized).join(", ");
+    }
+    // 量表题不需要 options
+  } else {
+    // 3. 无题型标记：尝试从问号后的选项列表推断单选题
+    const m = rest.match(/^(.+?[？?])\s*[:：]?\s*(.+)$/);
+    if (m && /[\/,，、]/.test(m[2]) && m[2].length < 120) {
+      questionText = m[1].trim();
+      options = splitOptions(m[2].replace(/\s*[/／]\s*/g, ", ")).join(", ");
+      type = "single";
+    } else {
+      // 兜底：作为单选开放题保留
+      questionText = rest;
+      type = "single";
+    }
+  }
+
+  if (!questionText) return null;
+  return { text: questionText, type, options, scale, rows };
+}
+
+// 把 "其他，请说明" / "其它，请注明" 等作为单一选项保留，不再按逗号切分
+function splitOptions(value) {
+  const protectedText = String(value || "").replace(/(其他|其它)，/g, "$1__OTHER_COMMA__");
+  return splitList(protectedText).map((item) => item.replace(/__OTHER_COMMA__/g, "，"));
+}
+
+function importQuestionnaire() {
+  syncResearchForm();
+  const text = (state.questionnaireText || "").trim();
+  if (!text) {
+    toast("请先粘贴问卷文本");
+    return;
+  }
+  const parsed = parseQuestionnaireText(text);
+  if (parsed.length < 3) {
+    toast("未能识别出 3 道以上题目，请检查格式");
+    return;
+  }
+  // 上限 8 道题（与 UI 一致）
+  state.quantQuestions = parsed.slice(0, 8);
+  state.quantInputMode = "manual";
+  toast(`已识别 ${parsed.length} 道题目${parsed.length > 8 ? "（已截取前 8 道）" : ""}`);
+  render();
+}
+
+// ===== Word 问卷文档导入 =====
+// 纯前端零依赖解析 .docx：解压 ZIP → 读取 word/document.xml → 按 <w:p> 提取段落文本
+// 浏览器要求：支持 DecompressionStream('deflate-raw')（Chrome 103+ / Firefox 113+ / Safari 16.4+）
+
+async function extractDocxText(file) {
+  if (!file) throw new Error("未选择文件");
+  const lowerName = file.name.toLowerCase();
+  if (lowerName.endsWith(".doc") && !lowerName.endsWith(".docx")) {
+    throw new Error("暂不支持 .doc 旧格式，请先用 Word 另存为 .docx 后再上传");
+  }
+  if (!lowerName.endsWith(".docx")) {
+    throw new Error("仅支持 .docx 格式文件");
+  }
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("当前浏览器不支持 docx 解压（需要 DecompressionStream API），请升级到 Chrome 103+ / Firefox 113+ / Safari 16.4+");
+  }
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const entry = findZipEntry(bytes, "word/document.xml");
+  if (!entry) {
+    throw new Error("文档格式异常：未在 .docx 中找到 word/document.xml 正文，请确认文件未损坏");
+  }
+  const xmlBytes = await inflateEntry(bytes, entry);
+  const xmlText = new TextDecoder("utf-8").decode(xmlBytes);
+  if (!xmlText.includes("<w:p") && !xmlText.includes("<w:t")) {
+    throw new Error("文档正文 XML 无有效段落，请确认 .docx 中包含问卷内容");
+  }
+  return extractParagraphsFromDocxXml(xmlText);
+}
+
+// ===== Excel 问卷文档导入 =====
+// 纯前端零依赖解析 .xlsx：解压 ZIP → 读取 xl/sharedStrings.xml + xl/worksheets/sheetN.xml → 按行提取
+// 智能识别 题号 / 题目内容 / 题型 / 选项 列，按 parseQuestionnaireText 友好格式拼接
+
+async function extractXlsxText(file) {
+  if (!file) throw new Error("未选择文件");
+  const lowerName = file.name.toLowerCase();
+  if (lowerName.endsWith(".xls") && !lowerName.endsWith(".xlsx")) {
+    throw new Error("暂不支持 .xls 旧格式，请先用 Excel 另存为 .xlsx 后再上传");
+  }
+  if (!lowerName.endsWith(".xlsx")) {
+    throw new Error("仅支持 .xlsx 格式文件");
+  }
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("当前浏览器不支持 xlsx 解压（需要 DecompressionStream API），请升级到 Chrome 103+ / Firefox 113+ / Safari 16.4+");
+  }
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const entries = listZipEntries(bytes);
+
+  // 1. 读取共享字符串表（如果存在）
+  const sharedStrings = [];
+  const ssEntry = entries.find((e) => e.name === "xl/sharedStrings.xml");
+  if (ssEntry) {
+    const ssBytes = await inflateEntry(bytes, ssEntry);
+    const ssXml = new TextDecoder("utf-8").decode(ssBytes);
+    parseSharedStringsXml(ssXml).forEach((s) => sharedStrings.push(s));
+  }
+
+  // 2. 找所有 sheet 文件（xl/worksheets/sheet1.xml, sheet2.xml, ...）
+  const sheetEntries = entries
+    .filter((e) => /^xl\/worksheets\/sheet\d+\.xml$/.test(e.name))
+    .sort((a, b) => {
+      const na = Number(a.name.match(/sheet(\d+)/)[1]);
+      const nb = Number(b.name.match(/sheet(\d+)/)[1]);
+      return na - nb;
+    });
+
+  if (sheetEntries.length === 0) {
+    throw new Error("文档格式异常：未在 .xlsx 中找到 xl/worksheets/sheetN.xml，请确认文件未损坏");
+  }
+
+  // 3. 解析第一个有内容的 sheet
+  for (const sheetEntry of sheetEntries) {
+    const sheetBytes = await inflateEntry(bytes, sheetEntry);
+    const sheetXml = new TextDecoder("utf-8").decode(sheetBytes);
+    if (!sheetXml.includes("<row") && !sheetXml.includes("<c ")) {
+      continue;
+    }
+    const rows = extractXlsxRows(sheetXml, sharedStrings);
+    if (rows.length === 0) continue;
+    const text = buildQuestionnaireTextFromXlsxRows(rows);
+    if (text.trim()) return text;
+  }
+
+  throw new Error("Excel 文档为空或无有效问卷行，请确认包含问卷题目");
+}
+
+// 解析 sharedStrings.xml：每个 <si> 是一个字符串项，可能包含多个 <r><t> 富文本
+function parseSharedStringsXml(xml) {
+  const strings = [];
+  const siRegex = /<si\b[^>]*>([\s\S]*?)<\/si>/g;
+  let m;
+  while ((m = siRegex.exec(xml)) !== null) {
+    const inner = m[1];
+    // 富文本：<r><t>...</t></r><r><t>...</t></r>，或者简单：<t>...</t>
+    const tRegex = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
+    let tm;
+    let text = "";
+    while ((tm = tRegex.exec(inner)) !== null) {
+      text += decodeXmlEntities(tm[1]);
+    }
+    strings.push(text);
+  }
+  return strings;
+}
+
+// 解析 sheet XML，返回二维数组 rows[rowIndex][colIndex]
+function extractXlsxRows(sheetXml, sharedStrings) {
+  const rows = [];
+  const rowRegex = /<row\b[^>]*>([\s\S]*?)<\/row>/g;
+  let rm;
+  while ((rm = rowRegex.exec(sheetXml)) !== null) {
+    const inner = rm[1];
+    const cells = [];
+    // cell：<c r="A1" t="s"><v>0</v></c> 或 <c r="A1" t="inlineStr"><is><t>...</t></is></c>
+    // 也可能是自闭合：<c r="A1"/>（空单元格）
+    // 注意：属性顺序不固定（r 和 t 可能互换），用 [^>]* 匹配整个开始标签后单独提取 t
+    const cellRegex = /<c\b([^>]*?)>([\s\S]*?)<\/c>|<c\b([^>]*?)\/>/g;
+    let cm;
+    while ((cm = cellRegex.exec(inner)) !== null) {
+      const attrs = cm[1] || cm[3] || "";
+      const content = cm[2] || "";
+      const typeMatch = attrs.match(/\bt="([^"]+)"/);
+      const type = typeMatch ? typeMatch[1] : null;
+      let value = "";
+      if (type === "s") {
+        // shared string：通过 <v> 中的索引查表
+        const vMatch = content.match(/<v>([\s\S]*?)<\/v>/);
+        if (vMatch) {
+          const idx = Number(vMatch[1]);
+          value = sharedStrings[idx] || "";
+        }
+      } else if (type === "inlineStr" || type === "str") {
+        // 内联字符串：找 <is><t>...</t></is> 或 <t>...</t>
+        const tMatch = content.match(/<t\b[^>]*>([\s\S]*?)<\/t>/);
+        if (tMatch) value = decodeXmlEntities(tMatch[1]);
+      } else {
+        // 数字、布尔、日期等：取 <v>
+        const vMatch = content.match(/<v>([\s\S]*?)<\/v>/);
+        if (vMatch) value = vMatch[1];
+      }
+      // 注意：cell 的 r 属性（如 "A1"）暗示列位置，空 cell 通常被省略，这里简单按出现顺序存储
+      // 缺点：跳过空 cell 后列会错位，但对问卷场景影响较小
+      cells.push(value);
+    }
+    if (cells.some((c) => String(c || "").trim())) {
+      rows.push(cells);
+    }
+  }
+  return rows;
+}
+
+// 智能拼接：识别 题号 / 题目内容 / 题型 / 选项 列，按 parseQuestionnaireText 友好格式拼接
+function buildQuestionnaireTextFromXlsxRows(rows) {
+  if (!rows.length) return "";
+
+  // 1. 尝试识别表头列
+  const header = rows[0].map((h) => String(h || "").trim());
+  const findCol = (keywords) => header.findIndex((h) => keywords.some((k) => h.includes(k)));
+  const idIdx = findCol(["题号", "题目编号", "question id", "q id", "q编号"]);
+  const textIdx = findCol(["题目内容", "题干", "question", "题目"]);
+  const typeIdx = findCol(["题型", "题目类型", "type"]);
+  const optionsIdx = findCol(["选项", "options", "答案选项"]);
+
+  // 2. 无表头识别：每行所有非空 cell 用空格拼接（兼容简单的"题号 + 题目"两列结构）
+  if (idIdx < 0 && textIdx < 0) {
+    return rows
+      .map((r) => r.filter((c) => String(c || "").trim()).join(" "))
+      .filter((line) => line.trim())
+      .join("\n");
+  }
+
+  // 3. 有表头：从第二行开始按列结构拼接
+  const lines = [];
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row.some((c) => String(c || "").trim())) continue;
+
+    const parts = [];
+    if (idIdx >= 0 && row[idIdx]) {
+      const id = String(row[idIdx]).trim();
+      // 标准化为 "Q1." 前缀，方便 parseQuestionLine 剥离
+      parts.push(/^Q?[\dA-Za-z]/.test(id) ? `${id}.` : id);
+    }
+    if (textIdx >= 0 && row[textIdx]) {
+      parts.push(String(row[textIdx]).trim());
+    }
+    const typeStr = typeIdx >= 0 ? String(row[typeIdx] || "").trim() : "";
+    const optionsStr = optionsIdx >= 0 ? String(row[optionsIdx] || "").trim() : "";
+    if (typeStr) {
+      // 标准化题型：单选题 → 单选；多选题 → 多选；量表题 → 量表10分（如果带分值则用分值）
+      const normalizedType = normalizeXlsxType(typeStr);
+      if (normalizedType) parts.push(`【${normalizedType}】`);
+    }
+    if (optionsStr) parts.push(optionsStr);
+
+    const line = parts.join(" ").trim();
+    if (line) lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+// 把 Excel 中常见的题型写法标准化为 parseQuestionLine 能识别的标记
+function normalizeXlsxType(typeStr) {
+  const s = String(typeStr || "").trim();
+  const t = s.toLowerCase().replace(/\s+/g, "");
+  const numMatch = t.match(/(\d+)/);
+  const num = numMatch ? numMatch[1] : null;
+
+  // 1. 矩阵：识别 "矩阵5分" / "矩阵题 5分" / "matrix 5" 等，带分值时输出 "矩阵N分"
+  if (/矩阵|matrix/.test(t)) {
+    return num ? `矩阵${num}分` : "矩阵";
+  }
+  // 2. 量表：识别 "量表10分" / "10分量表" / "scale 7" / "7分打分" 等
+  if (/量表|scale|打分|评分/.test(t)) {
+    return num ? `量表${num}分` : "量表";
+  }
+  // 3. 纯题型（无分值）
+  if (/单选|single/.test(t)) return "单选";
+  if (/多选|multiple|checkbox/.test(t)) return "多选";
+
+  // 4. 直接传入已标准化格式（"单选" / "多选" / "量表5分" / "矩阵10分" 等）
+  if (/^(单选|多选|量表\d*分?|矩阵\d*分?)$/.test(s)) return s;
+
+  // 5. 无法识别时保留原文（让 parseQuestionLine 兜底）
+  return s || null;
+}
+
+// 在 ZIP 中央目录中查找指定名称的条目
+function findZipEntry(bytes, targetName) {
+  const entries = listZipEntries(bytes);
+  return entries.find((e) => e.name === targetName) || null;
+}
+
+// 列出 ZIP 中央目录中的所有条目
+function listZipEntries(bytes) {
+  // 1. 从尾部找 EOCD（签名 0x06054b50）
+  const minEocdOffset = Math.max(0, bytes.length - 65557);
+  let eocdOffset = -1;
+  for (let i = bytes.length - 22; i >= minEocdOffset; i--) {
+    if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset < 0) throw new Error("文件不是有效的 ZIP（缺少结束标记）");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let cdOffset = view.getUint32(eocdOffset + 16, true);
+  const cdSize = view.getUint32(eocdOffset + 12, true);
+  // 处理 ZIP64（这里简单处理：若为 0xFFFFFFFF 则报错，原型足够）
+  if (cdOffset === 0xffffffff || cdSize === 0xffffffff) {
+    throw new Error("暂不支持 ZIP64 格式的文件，请用标准 Office 重新另存");
+  }
+  // 2. 遍历中央目录条目
+  const entries = [];
+  let offset = cdOffset;
+  const cdEnd = cdOffset + cdSize;
+  while (offset + 46 <= cdEnd) {
+    if (view.getUint32(offset, true) !== 0x02014b50) break;
+    const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const uncompressedSize = view.getUint32(offset + 24, true);
+    const nameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localHeaderOffset = view.getUint32(offset + 42, true);
+    const nameStart = offset + 46;
+    const name = new TextDecoder("utf-8").decode(bytes.subarray(nameStart, nameStart + nameLength));
+    entries.push({ name, method, compressedSize, uncompressedSize, localHeaderOffset });
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return entries;
+}
+
+// 根据中央目录条目读取本地文件头并解压
+async function inflateEntry(bytes, entry) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const lh = entry.localHeaderOffset;
+  if (view.getUint32(lh, true) !== 0x04034b50) {
+    throw new Error("ZIP 本地文件头损坏");
+  }
+  const lhNameLength = view.getUint16(lh + 26, true);
+  const lhExtraLength = view.getUint16(lh + 28, true);
+  const dataOffset = lh + 30 + lhNameLength + lhExtraLength;
+  const compressed = bytes.subarray(dataOffset, dataOffset + entry.compressedSize);
+  if (entry.method === 0) {
+    // STORED：无压缩
+    return compressed;
+  }
+  if (entry.method !== 8) {
+    throw new Error(`不支持的压缩方法（method=${entry.method}）`);
+  }
+  // DEFLATE：用原生 DecompressionStream 解压
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(compressed);
+      controller.close();
+    }
+  });
+  const decompressed = stream.pipeThrough(new DecompressionStream("deflate-raw"));
+  const reader = decompressed.getReader();
+  const chunks = [];
+  let totalLength = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    totalLength += value.byteLength;
+  }
+  const result = new Uint8Array(totalLength);
+  let pos = 0;
+  for (const c of chunks) {
+    result.set(c, pos);
+    pos += c.byteLength;
+  }
+  return result;
+}
+
+// 从 docx 的 word/document.xml 中提取段落文本，按 <w:p> 分行
+function extractParagraphsFromDocxXml(xml) {
+  // 按顺序遍历段落内的 <w:t>...</w:t>、<w:tab/>、<w:br/> 节点，拼接成段落文本
+  // 这样 tab/br 才能正确插入到对应位置（它们在 <w:r> 内但不在 <w:t> 内）
+  const paragraphs = [];
+  const pRegex = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g;
+  let m;
+  while ((m = pRegex.exec(xml)) !== null) {
+    const inner = m[1];
+    let text = "";
+    const nodeRegex = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:tab\b[^>]*\/>|<w:br\b[^>]*\/>/g;
+    let nm;
+    while ((nm = nodeRegex.exec(inner)) !== null) {
+      // 注意：<w:tab 也以 <w:t 开头，必须先判断 tab/br
+      if (nm[0].startsWith("<w:tab")) {
+        text += " ";
+      } else if (nm[0].startsWith("<w:br")) {
+        text += "\n";
+      } else {
+        // <w:t>...</w:t>
+        text += decodeXmlEntities(nm[1]);
+      }
+    }
+    if (text.trim()) paragraphs.push(text.trim());
+  }
+  return paragraphs.join("\n");
+}
+
+function decodeXmlEntities(text) {
+  return String(text)
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&amp;/g, "&");
+}
+
+// 根据文件扩展名分派到 docx / xlsx 解析器
+async function extractQuestionnaireFileText(file) {
+  const lowerName = (file.name || "").toLowerCase();
+  if (lowerName.endsWith(".docx")) {
+    return extractDocxText(file);
+  }
+  if (lowerName.endsWith(".xlsx")) {
+    return extractXlsxText(file);
+  }
+  if (lowerName.endsWith(".doc") || lowerName.endsWith(".xls")) {
+    throw new Error("暂不支持 Office 97-2003 旧格式（.doc/.xls），请用新版 Office 另存为 .docx/.xlsx 后再上传");
+  }
+  throw new Error("仅支持 .docx 或 .xlsx 格式文件");
+}
+
+async function importQuestionnaireFile(file) {
+  if (!file) return;
+  state.isImportingDocx = true;
+  state.importError = "";
+  render();
+  try {
+    const text = await extractQuestionnaireFileText(file);
+    if (!text.trim()) {
+      throw new Error("文档内容为空，请确认文件中包含问卷题目");
+    }
+    syncResearchForm();
+    state.questionnaireText = text;
+    const parsed = parseQuestionnaireText(text);
+    if (parsed.length < 3) {
+      state.isImportingDocx = false;
+      render();
+      toast("已读取文档，但未识别出 3 道以上题目，请检查文本");
+      return;
+    }
+    state.quantQuestions = parsed.slice(0, 8);
+    state.quantInputMode = "manual";
+    state.isImportingDocx = false;
+    const label = file.name.toLowerCase().endsWith(".xlsx") ? "Excel" : "Word";
+    toast(`已从 ${label} 识别 ${parsed.length} 道题目${parsed.length > 8 ? "（已截取前 8 道）" : ""}`);
+    render();
+  } catch (error) {
+    state.isImportingDocx = false;
+    state.importError = error.message || "文档解析失败";
+    render();
+  }
+}
+
 // ===== AI 调用相关函数 =====
 
 function buildQualPrompt() {
@@ -573,6 +1104,11 @@ ${questions}
    - 一段200字以内的总结
    - 3-5条关键发现（每条具体、有洞察）
    - 2-3组交叉分析（例如"高健康重视度 vs 购买意愿"）
+   - **rationale 数组**：为每道题单独提供一条"比例分布说明"，用于证明数据分布可信。每条必须包含：
+     * questionIndex：题目序号（从 0 开始）
+     * reasoning：80-150 字说明，需引用：1）人群画像 / 配额特征如何影响该题分布；2）该题与其他题的内在一致性（如"重视健康的人购买意愿更高"）；3）分布形态的商业逻辑（如"前两选项合计 73% 反映主流选择集中度"）。
+     拒绝空洞表述，必须落到具体数字和画像特征上。
+   顺序与 questions 数组一一对应。
 
 ## 输出格式
 请严格按以下JSON格式输出（不要包含markdown代码块标记，直接输出JSON）：
@@ -591,6 +1127,9 @@ ${questions}
     "findings": ["关键发现1", "关键发现2"],
     "crosstab": [
       ["维度A", "维度B描述", "百分比"]
+    ],
+    "rationale": [
+      {"questionIndex": 0, "reasoning": "该题分布说明，结合人群画像、配额、内在一致性与商业逻辑"}
     ]
   }
 }
@@ -821,11 +1360,36 @@ function makeQuantResult() {
   const topOption = firstQuestion?.optionsArray?.[0] || "核心选项";
   const topMatrixRow = matrixQuestion?.matrix?.sort((a, b) => Number(b.mean) - Number(a.mean))?.[0]?.row || "关键因素";
   const scaleLabel = scaleQuestion?.text || "核心态度指标";
+  const audSum = audienceSummary();
+  const quaSum = quotaSummary();
+  const rationale = questions.map((q, i) => {
+    const head = `第 ${i + 1} 题（${q.text}）：`;
+    let body = "";
+    if (q.type === "single") {
+      const top = q.optionsArray?.[0] || "";
+      const topPct = q.values?.[0] || 0;
+      const sum2 = (q.values?.[0] || 0) + (q.values?.[1] || 0);
+      body = `选项「${top}」占比 ${topPct}%，前两选项合计 ${sum2}%，反映主流选择集中度较高。该分布与画像「${audSum}」、配额「${quaSum}」中消费力 / 心理标签一致，且与后续态度题呈现正向共变，说明比例可信。`;
+    } else if (q.type === "multiple") {
+      const top = q.optionsArray?.[0] || "";
+      const topPct = q.values?.[0] || 0;
+      body = `多选题首选「${top}」占比 ${topPct}%，体现该属性对目标人群的关键性。各选项百分比可合计超 100%，符合多选特征。分布与画像「${audSum}」的品类行为标签和后续矩阵打分内在一致，可信度较高。`;
+    } else if (q.type === "scale") {
+      const distTail = q.distribution?.slice(Math.floor(q.distribution.length / 2)) || [];
+      body = `均值 ${q.mean}（${q.scale} 分制），分布在中高分段集中（${distTail.join("/")}），符合画像「${audSum}」的态度倾向。与购买意愿题呈正相关，分布形态合理。`;
+    } else if (q.type === "matrix") {
+      const sorted = [...(q.matrix || [])].sort((a, b) => Number(b.mean) - Number(a.mean));
+      const topRow = sorted[0]?.row || "—";
+      const topMean = sorted[0]?.mean || "—";
+      body = `矩阵维度中「${topRow}」均值最高（${topMean}），其余维度按预期梯度递减，与画像「${audSum}」的消费偏好一致。维度间差异合理，未出现异常聚集，比例可信。`;
+    }
+    return { questionIndex: i, reasoning: head + body };
+  });
   return {
     questions,
     isMock: true,
     analysis: {
-      summary: `当前模拟样本 N=${state.sampleSize}，合成人群为"${audienceSummary()}"，配额结构为：${quotaSummary()}。结果显示「${topOption}」是相对更突出的选择方向，「${topMatrixRow}」是影响判断的关键因素，${scaleLabel} 可作为后续正式问卷的核心交叉分析变量。`,
+      summary: `当前模拟样本 N=${state.sampleSize}，合成人群为"${audSum}"，配额结构为：${quaSum}。结果显示「${topOption}」是相对更突出的选择方向，「${topMatrixRow}」是影响判断的关键因素，${scaleLabel} 可作为后续正式问卷的核心交叉分析变量。`,
       exports: ["原始样本 CSV", "统计汇总 CSV", "分析摘要 Markdown"],
       findings: [
         `选择倾向集中在「${topOption}」，说明该方向可作为后续概念验证或方案筛选的优先观察点。`,
@@ -836,7 +1400,8 @@ function makeQuantResult() {
         ["核心态度高", `选择「${topOption}」`, "68%"],
         ["核心态度中", `选择「${topOption}」`, "47%"],
         ["核心态度低", `选择「${topOption}」`, "29%"]
-      ]
+      ],
+      rationale
     }
   };
 }
@@ -1002,7 +1567,8 @@ async function startGeneration() {
         parsed.analysis = {
           summary: "AI 生成分析摘要时中断，请重新生成。",
           findings: ["请重新生成以获取完整分析"],
-          crosstab: [["数据", "不完整", "请重试"]]
+          crosstab: [["数据", "不完整", "请重试"]],
+          rationale: []
         };
       }
     }
@@ -1082,7 +1648,17 @@ function quantCsv() {
 function quantAnalysisMarkdown() {
   if (!state.result) return "";
   const a = state.result.analysis;
-  return `# ${state.topic} - 问卷模拟分析\n\n${a.summary}\n\n## 关键发现\n${a.findings.map((f) => `- ${f}`).join("\n")}\n\n## 交叉表预览\n${a.crosstab.map((row) => `- ${row[0]} / ${row[1]}：${row[2]}`).join("\n")}\n\n> 合成数据用于研究设计与假设预验证，不替代真实样本统计推断。`;
+  const questions = state.result.questions || [];
+  const rationale = Array.isArray(a.rationale) ? a.rationale : [];
+  const rationaleSection = rationale.length > 0
+    ? `\n\n## 比例分布说明\n${rationale.map((r) => {
+        const idx = typeof r.questionIndex === "number" ? r.questionIndex : -1;
+        const q = questions[idx];
+        const label = q ? `第 ${idx + 1} 题 · ${q.text}` : `第 ${(idx + 1) || "—"} 题`;
+        return `### ${label}\n${r.reasoning || ""}`;
+      }).join("\n\n")}`
+    : "";
+  return `# ${state.topic} - 问卷模拟分析\n\n${a.summary}\n\n## 关键发现\n${a.findings.map((f) => `- ${f}`).join("\n")}\n\n## 交叉表预览\n${a.crosstab.map((row) => `- ${row[0]} / ${row[1]}：${row[2]}`).join("\n")}${rationaleSection}\n\n> 合成数据用于研究设计与假设预验证，不替代真实样本统计推断。`;
 }
 
 function App() {
@@ -1255,7 +1831,7 @@ function AudienceBuilder() {
       <div class="audience-grid">
         <div class="field"><label for="aud-age">年龄</label><input id="aud-age" value="${escapeHtml(c.age)}" /></div>
         <div class="field"><label for="aud-gender">性别比例</label><input id="aud-gender" value="${escapeHtml(c.gender)}" /></div>
-        <div class="field"><label for="aud-city">城市层级</label><input id="aud-city" value="${escapeHtml(c.city)}" /></div>
+        <div class="field"><label for="aud-city">城市层级</label><input id="aud-city" value="${escapeHtml(c.city)}" placeholder="例如：一线城市 / 国外 / 北美 / 东南亚" /></div>
         <div class="field"><label for="aud-income">收入 / 消费力</label><input id="aud-income" value="${escapeHtml(c.income)}" /></div>
         <div class="field"><label for="aud-usage">品类行为</label><input id="aud-usage" value="${escapeHtml(c.usage)}" /></div>
         <div class="field"><label for="aud-price">价格敏感度</label><input id="aud-price" value="${escapeHtml(c.price)}" /></div>
@@ -1316,36 +1892,32 @@ function QuotaDimension(dimension) {
   `;
 }
 
-function OutlineForm() {
-  return `
-    <div class="form-grid">
-      ${CommonResearchFields()}
-      <div class="field">
-        <label for="outline-text">访谈大纲</label>
-        <textarea id="outline-text" class="large-textarea">${escapeHtml(state.outlineText)}</textarea>
-      </div>
-      <div class="actions">
-        <button class="secondary" data-action="import-outline">从大纲生成问题</button>
-      </div>
-      <div class="notice">导入后会把大纲拆成 3 个访谈问题。正式版本可扩展为 Word / Markdown 大纲导入。</div>
-    </div>
-  `;
-}
-
 function QualQuestionForm() {
   return `
     <div class="form-grid">
       ${CommonResearchFields()}
-      ${state.qualQuestions.map((question, index) => `
+      ${InputModeSwitcher("qual")}
+      ${state.qualInputMode === "import" ? `
         <div class="field">
-          <label for="qual-${index}">访谈问题 ${index + 1}</label>
-          <textarea id="qual-${index}">${escapeHtml(question)}</textarea>
+          <label for="outline-text">访谈大纲</label>
+          <textarea id="outline-text" class="large-textarea" placeholder="按行写入研究目标、目标人群、访谈模块...">${escapeHtml(state.outlineText)}</textarea>
         </div>
-      `).join("")}
-      <div class="analysis-options">
-        ${["核心发现", "态度聚类", "痛点顾虑", "行动建议"].map((item) => `<span>${item}</span>`).join("")}
-      </div>
-      <div class="notice">AI 会同时输出访谈笔录和归纳分析，便于直接进入报告撰写。</div>
+        <div class="actions">
+          <button class="secondary" data-action="import-outline">从大纲生成问题</button>
+        </div>
+        <div class="notice">导入后会把大纲拆成 3 个访谈问题。支持识别研究目标、目标人群、访谈模块等结构化大纲。</div>
+      ` : `
+        ${state.qualQuestions.map((question, index) => `
+          <div class="field">
+            <label for="qual-${index}">访谈问题 ${index + 1}</label>
+            <textarea id="qual-${index}">${escapeHtml(question)}</textarea>
+          </div>
+        `).join("")}
+        <div class="analysis-options">
+          ${["核心发现", "态度聚类", "痛点顾虑", "行动建议"].map((item) => `<span>${item}</span>`).join("")}
+        </div>
+        <div class="notice">AI 会同时输出访谈笔录和归纳分析，便于直接进入报告撰写。</div>
+      `}
     </div>
   `;
 }
@@ -1354,39 +1926,53 @@ function QuantQuestionForm() {
   return `
     <div class="form-grid">
       ${CommonResearchFields()}
-      ${state.quantQuestions.map((question, index) => `
-        <div class="question-card">
-          <div class="question-row">
-            <input id="q-text-${index}" value="${escapeHtml(question.text)}" placeholder="题目 ${index + 1}" />
-            <select id="q-type-${index}" data-qtype="${index}">
-              <option value="single" ${question.type === "single" ? "selected" : ""}>单选</option>
-              <option value="multiple" ${question.type === "multiple" ? "selected" : ""}>多选</option>
-              <option value="scale" ${question.type === "scale" ? "selected" : ""}>量表</option>
-              <option value="matrix" ${question.type === "matrix" ? "selected" : ""}>矩阵打分</option>
-            </select>
-            <button class="ghost" data-remove-question="${index}" ${state.quantQuestions.length <= 3 ? "disabled" : ""}>删除</button>
-          </div>
-          ${QuantQuestionConfig(question, index)}
+      ${InputModeSwitcher("quant")}
+      ${state.quantInputMode === "import" ? `
+        <div class="field">
+          <label for="questionnaire-text">问卷文本</label>
+          <textarea id="questionnaire-text" class="large-textarea" placeholder="每行一道题，例如：&#10;Q1. 你会购买这款产品吗？【单选】一定会 / 可能会 / 不确定 / 不会&#10;Q2. 影响购买的因素？【多选】价格 / 品牌 / 口碑&#10;Q3. 健康重视程度【量表10分】&#10;Q4. 以下因素的重要性【矩阵5分】口味 / 价格 / 成分">${escapeHtml(state.questionnaireText)}</textarea>
         </div>
-      `).join("")}
-      <button class="ghost" data-action="add-question" ${state.quantQuestions.length >= 8 ? "disabled" : ""}>添加题目</button>
-      <div class="notice">AI 会根据人群画像生成合理的统计分布，用于研究设计与假设预验证。</div>
+        <div class="upload-row">
+          <label class="upload-button ${state.isImportingDocx ? "loading" : ""}">
+            <input type="file" accept=".docx,.xlsx" data-docx-input hidden ${state.isImportingDocx ? "disabled" : ""} />
+            <span>${state.isImportingDocx ? "正在解析文档..." : "上传 Word/Excel 问卷文档"}</span>
+          </label>
+          <span class="upload-hint">支持 .docx / .xlsx；自动识别题号 / 题目 / 题型 / 选项列</span>
+        </div>
+        ${state.importError ? `<div class="upload-error">⚠️ ${escapeHtml(state.importError)}</div>` : ""}
+        <div class="actions">
+          <button class="primary" data-action="import-questionnaire" ${state.isImportingDocx ? "disabled" : ""}>识别题型并生成问卷</button>
+        </div>
+        <div class="notice">支持识别【单选】、【多选】、【量表5分/7分/10分】、【矩阵5分/10分】；选项可用 / ， 、 分隔；'其他'/'其它' 会作为合法选项保留。</div>
+      ` : `
+        ${state.quantQuestions.map((question, index) => `
+          <div class="question-card">
+            <div class="question-row">
+              <input id="q-text-${index}" value="${escapeHtml(question.text)}" placeholder="题目 ${index + 1}" />
+              <select id="q-type-${index}" data-qtype="${index}">
+                <option value="single" ${question.type === "single" ? "selected" : ""}>单选</option>
+                <option value="multiple" ${question.type === "multiple" ? "selected" : ""}>多选</option>
+                <option value="scale" ${question.type === "scale" ? "selected" : ""}>量表</option>
+                <option value="matrix" ${question.type === "matrix" ? "selected" : ""}>矩阵打分</option>
+              </select>
+              <button class="ghost" data-remove-question="${index}" ${state.quantQuestions.length <= 3 ? "disabled" : ""}>删除</button>
+            </div>
+            ${QuantQuestionConfig(question, index)}
+          </div>
+        `).join("")}
+        <button class="ghost" data-action="add-question" ${state.quantQuestions.length >= 8 ? "disabled" : ""}>添加题目</button>
+        <div class="notice">AI 会根据人群画像生成合理的统计分布，用于研究设计与假设预验证。</div>
+      `}
     </div>
   `;
 }
 
-function QuestionnaireImportForm() {
+function InputModeSwitcher(mode) {
+  const current = mode === "qual" ? state.qualInputMode : state.quantInputMode;
   return `
-    <div class="form-grid">
-      ${CommonResearchFields()}
-      <div class="field">
-        <label for="questionnaire-text">问卷文本</label>
-        <textarea id="questionnaire-text" class="large-textarea">${escapeHtml(state.questionnaireText)}</textarea>
-      </div>
-      <div class="actions">
-        <button class="secondary" data-action="import-questionnaire">识别题型并生成问卷</button>
-      </div>
-      <div class="notice">支持识别【单选】、【多选】、【量表5分/7分/10分】、【矩阵5分/10分】。正式版本可扩展 Excel / 问卷星文本导入。</div>
+    <div class="input-mode-switcher" role="tablist">
+      <button type="button" class="${current === "manual" ? "active" : ""}" data-input-mode="${mode}" data-mode-value="manual" role="tab">手动编辑</button>
+      <button type="button" class="${current === "import" ? "active" : ""}" data-input-mode="${mode}" data-mode-value="import" role="tab">导入文本</button>
     </div>
   `;
 }
@@ -1431,6 +2017,19 @@ function KeyValidationHint() {
   return `<div style="color: #2EB75B; font-size: 13px; margin-top: 6px;">✅ Key 格式校验通过</div>`;
 }
 
+function DefaultKeyBanner() {
+  if (!isUsingDefaultKey()) return "";
+  return `
+    <div class="default-key-banner">
+      <div class="banner-icon">🔑</div>
+      <div class="banner-text">
+        <strong>正在使用内置默认 Key（开箱即用）</strong>
+        <span>当前 ${escapeHtml(MODEL_CONFIG[state.provider].name)} 使用项目内置的体验 Key，适合轻度试用。如需长期或大量调用，请在上方填入你自己的 API Key 并保存。</span>
+      </div>
+    </div>
+  `;
+}
+
 function SettingsPage() {
   const config = MODEL_CONFIG[state.provider];
   if (!state.apiKey) state.apiKey = getSavedKey();
@@ -1448,13 +2047,19 @@ function SettingsPage() {
         <section class="panel">
           <div class="section-title"><div><h2>模型提供方</h2><p>切换提供方会读取本地保存的 Key。</p></div></div>
           <div class="provider-grid">
-            ${Object.entries(MODEL_CONFIG).map(([key, item]) => `
+            ${Object.entries(MODEL_CONFIG).map(([key, item]) => {
+              const hasOwnKey = !!localStorage.getItem(item.key);
+              const hasDefault = !!DEFAULT_PROVIDER_KEYS[key];
+              const status = hasOwnKey ? "已保存 Key" : (hasDefault ? "内置 Key" : "未保存 Key");
+              return `
               <button class="provider-card ${state.provider === key ? "active" : ""}" data-provider="${key}">
                 <strong>${item.name}</strong>
-                <span>${getSavedKey(key) ? "已保存 Key" : "未保存 Key"}</span>
+                <span>${status}</span>
               </button>
-            `).join("")}
+              `;
+            }).join("")}
           </div>
+          ${DefaultKeyBanner()}
         </section>
         <section class="panel">
           <div class="section-title">
@@ -1463,7 +2068,7 @@ function SettingsPage() {
           </div>
           <div class="form-grid">
             <div class="field">
-              <label for="api-key">API Key</label>
+              <label for="api-key">API Key ${isUsingDefaultKey() ? '<span class="default-key-tag">内置</span>' : ""}</label>
               <div class="input-action">
                 <input id="api-key" type="${state.showKey ? "text" : "password"}" value="${escapeHtml(state.apiKey)}" placeholder="${config.placeholder}" />
                 <button class="ghost" data-action="toggle-key">${state.showKey ? "隐藏" : "显示"}</button>
@@ -1658,14 +2263,29 @@ function QuantQuestionResult(question, index) {
 
 function QuantAnalysis() {
   const a = state.result.analysis;
+  const questions = state.result.questions || [];
+  const rationale = Array.isArray(a.rationale) ? a.rationale : [];
   return `
     <section class="panel">
-      <div class="section-title"><div><h2>分析摘要</h2><p>${a.summary}</p></div></div>
+      <div class="section-title"><div><h2>分析摘要</h2><p>${escapeHtml(a.summary)}</p></div></div>
       <div class="analysis-grid">
-        ${a.crosstab.map((row) => `<div class="analysis-card"><strong>${row[0]}</strong><span>${row[1]}：${row[2]}</span></div>`).join("")}
+        ${a.crosstab.map((row) => `<div class="analysis-card"><strong>${escapeHtml(row[0])}</strong><span>${escapeHtml(row[1])}：${escapeHtml(row[2])}</span></div>`).join("")}
       </div>
       <h2>关键发现</h2>
-      <ul class="insight-list">${a.findings.map((item) => `<li>${item}</li>`).join("")}</ul>
+      <ul class="insight-list">${a.findings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      ${rationale.length > 0 ? `
+        <h2 style="margin-top:24px">比例分布说明</h2>
+        <p class="audience" style="margin-bottom:12px">逐题解释比例为何如此分布，引用人群画像、配额特征、题目内在一致性与商业逻辑，作为数据可信度证据。</p>
+        <div class="rationale-list">
+          ${rationale.map((r) => {
+            const idx = typeof r.questionIndex === "number" ? r.questionIndex : -1;
+            const q = questions[idx];
+            const qLabel = q ? `第 ${idx + 1} 题 · ${escapeHtml(q.text)}` : `第 ${(idx + 1) || "—"} 题`;
+            const reasoning = escapeHtml(r.reasoning || "");
+            return `<div class="rationale-item"><div class="rationale-head">${qLabel}</div><div class="rationale-body">${reasoning}</div></div>`;
+          }).join("")}
+        </div>
+      ` : ""}
       <div class="notice">合成数据由 AI 根据人群画像生成，用于研究设计与假设预验证，不替代真实样本统计推断。</div>
     </section>
   `;
@@ -1724,6 +2344,13 @@ function bindEvents() {
       state.resultTab = target.dataset.resultTab;
       render();
     }
+    if (target.dataset.inputMode) {
+      const mode = target.dataset.inputMode;
+      const value = target.dataset.modeValue;
+      if (mode === "qual") state.qualInputMode = value;
+      else state.quantInputMode = value;
+      render();
+    }
     if (target.hasAttribute("data-remove-question")) {
       syncResearchForm();
       state.quantQuestions.splice(Number(target.dataset.removeQuestion), 1);
@@ -1752,6 +2379,8 @@ function bindEvents() {
       state.quantQuestions.push({ text: "", type: "single", options: "选项A, 选项B, 选项C, 选项D", scale: "1-5", rows: "" });
       render();
     }
+    if (action === "import-outline") importOutline();
+    if (action === "import-questionnaire") importQuestionnaire();
     if (action === "save-settings") saveModelSettings();
     if (action === "clear-key") clearApiKey();
     if (action === "toggle-key") {
@@ -1797,6 +2426,14 @@ function bindEvents() {
     if (event.target.dataset.qtype) {
       syncResearchForm();
       render();
+    }
+    if (event.target.dataset.docxInput !== undefined) {
+      const file = event.target.files && event.target.files[0];
+      if (file) {
+        importQuestionnaireFile(file);
+      }
+      // 重置 value 以便重复选择同一文件也能触发 change
+      event.target.value = "";
     }
   });
 
