@@ -36,12 +36,13 @@ ${code}
 // 把需要测试的符号暴露出来
 return {
   MODEL_CONFIG,
-  DEFAULT_PROVIDER_KEYS,
+  PROXY_PROVIDERS,
   state,
   getSavedKey,
-  isUsingDefaultKey,
+  shouldUseProxy,
   validateKeyFormat,
-  migrateToDefaultProvider
+  migrateToDefaultProvider,
+  hasModelReady
 };
 `;
 
@@ -54,16 +55,16 @@ function check(name, actual, expected) {
   results.push({ name, pass, actual, expected });
 }
 
-// Test 1: DEFAULT_PROVIDER_KEYS 包含 zhipu
-check('内置 Key 包含 zhipu',
-  Object.keys(api.DEFAULT_PROVIDER_KEYS),
+// Test 1: PROXY_PROVIDERS 包含 zhipu
+check('代理支持 zhipu',
+  Object.keys(api.PROXY_PROVIDERS),
   ['zhipu']
 );
 
-// Test 2: zhipu Key 是用户的真实 Key
-check('zhipu 内置 Key 正确',
-  api.DEFAULT_PROVIDER_KEYS.zhipu,
-  'bb32a87bafb94891a4aab4eeff9b48b4.L5NZNKkIWgWWUMRS'
+// Test 2: zhipu 配置正确（环境变量名）
+check('zhipu 代理 envKey 正确',
+  api.PROXY_PROVIDERS.zhipu.envKey,
+  'ZHIPU_API_KEY'
 );
 
 // Test 3: 默认 provider 是 zhipu（清空 localStorage 时）
@@ -72,34 +73,34 @@ check('默认 provider 是 zhipu',
   'zhipu'
 );
 
-// Test 4: 未保存 Key 时，getSavedKey 返回内置 Key
-check('未保存 Key 时回退到内置 Key',
-  api.getSavedKey('zhipu'),
-  'bb32a87bafb94891a4aab4eeff9b48b4.L5NZNKkIWgWWUMRS'
-);
-
-// Test 5: isUsingDefaultKey 在未保存 Key 时为 true
-check('未保存 Key 时 isUsingDefaultKey=true',
-  api.isUsingDefaultKey('zhipu'),
+// Test 4: 未保存 Key 时走代理
+check('未保存 Key 时 shouldUseProxy=true',
+  api.shouldUseProxy('zhipu'),
   true
 );
 
-// Test 6: kimi 没有内置 Key
-check('kimi 没有内置 Key',
-  api.DEFAULT_PROVIDER_KEYS.kimi || null,
+// Test 5: 未保存 Key 时 hasModelReady=true（代理可用）
+check('代理可用时 hasModelReady=true',
+  api.hasModelReady(),
+  true
+);
+
+// Test 6: kimi 不支持代理
+check('kimi 不支持代理',
+  api.PROXY_PROVIDERS.kimi || null,
   null
 );
 
-// Test 7: kimi 未保存 Key 时 getSavedKey 返回空字符串
-check('kimi 未保存 Key 时返回空',
-  api.getSavedKey('kimi'),
-  ''
+// Test 7: kimi 未保存 Key 时不走代理
+check('kimi 未保存 Key 时 shouldUseProxy=false',
+  api.shouldUseProxy('kimi'),
+  false
 );
 
-// Test 8: 保存 Key 后 isUsingDefaultKey 变为 false
+// Test 8: 保存 Key 后 shouldUseProxy 变为 false
 global.localStorage.setItem('synthuser_api_key_zhipu', 'user-own-key-1234567890123');
-check('保存 Key 后 isUsingDefaultKey=false',
-  api.isUsingDefaultKey('zhipu'),
+check('保存 Key 后 shouldUseProxy=false',
+  api.shouldUseProxy('zhipu'),
   false
 );
 
@@ -109,20 +110,14 @@ check('保存 Key 后 getSavedKey 返回用户 Key',
   'user-own-key-1234567890123'
 );
 
-// Test 10: 清除后又回退到内置 Key
+// Test 10: 清除后又回退到代理模式
 global.localStorage.removeItem('synthuser_api_key_zhipu');
-check('清除 Key 后又回退到内置 Key',
-  api.getSavedKey('zhipu'),
-  'bb32a87bafb94891a4aab4eeff9b48b4.L5NZNKkIWgWWUMRS'
+check('清除 Key 后又走代理',
+  api.shouldUseProxy('zhipu'),
+  true
 );
 
-// Test 11: 内置 Key 通过 validateKeyFormat 校验
-check('内置 Key 通过校验',
-  api.validateKeyFormat(api.DEFAULT_PROVIDER_KEYS.zhipu, 'zhipu'),
-  null
-);
-
-// Test 12: 模拟旧版本用户：localStorage 里 provider=kimi，且没保存 kimi Key
+// Test 11: 模拟旧版本用户：localStorage 里 provider=kimi，且没保存 kimi Key
 // 此时应该被 migrateToDefaultProvider 切换到 zhipu
 global.localStorage.setItem('synthuser_provider', 'kimi');
 // 不设置 kimi 的 key
@@ -138,7 +133,7 @@ check('迁移后 localStorage 同步更新',
   'zhipu'
 );
 
-// Test 13: 已保存自己 Key 的 kimi 用户不应被迁移
+// Test 12: 已保存自己 Key 的 kimi 用户不应被迁移
 global.localStorage.setItem('synthuser_provider', 'kimi');
 global.localStorage.setItem('synthuser_api_key_kimi', 'sk-user-own-kimi-key-1234567890123');
 const freshApi2 = new Function(moduleCode)();
@@ -146,6 +141,14 @@ freshApi2.migrateToDefaultProvider();
 check('kimi 已保存 Key 时不迁移',
   freshApi2.state.provider,
   'kimi'
+);
+
+// Test 13: 代理模式下 validateApiConfig 返回 null（不需要校验）
+const freshApi3 = new Function(moduleCode)();
+freshApi3.migrateToDefaultProvider();
+check('代理模式下 hasModelReady=true（无需 Key）',
+  freshApi3.hasModelReady(),
+  true
 );
 
 // 输出测试报告

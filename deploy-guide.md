@@ -57,6 +57,40 @@ vercel --prod
 
 本项目已为 Cloudflare Pages 做好全部适配（`_redirects` SPA 回退、`_headers` 缓存策略、PWA Manifest、Service Worker 均已就绪），可一键部署。
 
+#### 配置 API Key 环境变量（必做，否则代理调用会失败）
+
+本项目通过 Cloudflare Pages Functions 代理调用 AI API（路径 `functions/api/chat.js`），Key 保存在 Cloudflare 环境变量里，前端完全不暴露。
+
+1. 打开 https://dash.cloudflare.com → 你的 Pages 项目（如 `sym`）→ **Settings** → **Environment variables**
+2. 点击 **Add variable**，按需添加（至少加 ZHIPU_API_KEY）：
+
+   | Variable name | Value | Type | 说明 |
+   |---|---|---|---|
+   | `ZHIPU_API_KEY` | `你的智谱 API Key` | **Encrypt** | 智谱 GLM-4-Flash 默认调用，推荐使用 |
+   | `KIMI_API_KEY` | `你的 Kimi Key` | Encrypt | 可选，若需要用 Kimi |
+   | `DEEPSEEK_API_KEY` | `你的 DeepSeek Key` | Encrypt | 可选，若需要用 DeepSeek |
+
+3. **Type 选 Encrypt**（加密存储，Cloudflare 后台也无法读取，仅部署时注入到 Function 环境）
+4. **Environment 选 Production**（生产环境），如果 preview 分支也想用，再加一份选 Preview
+5. 点击 **Save**，然后回到 Deployments → 触发一次重新部署（环境变量改动需要重新部署才生效）
+
+> 注意：环境变量名必须**全大写**，如 `ZHIPU_API_KEY`，不能是 `zhipu_api_key`，否则 Function 读不到。
+
+#### 验证代理是否生效
+
+部署完成后：
+
+1. 访问你的 Pages 域名（如 `https://sym.pages.dev`）
+2. 进入「模型设置」页面 → 智谱 GLM 卡片应显示「代理可用」徽标
+3. 看到蓝色横幅「当前通过后端代理调用（无需配置 Key）」✅
+4. 直接回到研究页点「生成问卷结果」，能正常调用说明代理已生效
+
+如果点击生成报错"代理服务出错（500）"或"无法连接到代理服务 /api/chat"，请检查：
+
+- Cloudflare Pages 项目根目录下是否有 `functions/api/chat.js` 文件
+- Settings → Functions → 是否已启用 Functions（一般默认启用）
+- Deployments → 最新一次部署的 Build logs 里是否有 `Found Functions directory at /functions` 字样
+
 #### 方式 1：直接上传文件夹（最快，无需 Git）
 
 1. 访问 [https://dash.cloudflare.com](https://dash.cloudflare.com) → Workers & Pages → Create → Pages → Upload assets

@@ -5,11 +5,10 @@ const MODEL_CONFIG = {
   custom: { name: "自定义模型", key: "synthuser_api_key_custom", placeholder: "兼容 OpenAI 格式的 API Key", model: "your-model-name", baseUrl: "" }
 };
 
-// 内置默认 API Key：首次访问时若用户未保存自己的 Key，则自动使用，开箱即用。
-// 用户在「模型设置」中保存自己的 Key 后会覆盖默认值。
-// 注意：内置 Key 部署到公网后会被访问者看到，仅适用于免费额度 / 测试场景，正式生产请替换为用户自有的 Key。
-const DEFAULT_PROVIDER_KEYS = {
-  zhipu: "bb32a87bafb94891a4aab4eeff9b48b4.L5NZNKkIWgWWUMRS"
+// 支持后端代理的 provider 列表（Key 保存在 Cloudflare 环境变量里，前端完全不暴露）
+// 当用户未保存自己的 Key 时，前端会走 /api/chat 代理；用户保存了 Key 后则直接用自己的 Key
+const PROXY_PROVIDERS = {
+  zhipu: { envKey: "ZHIPU_API_KEY" }
 };
 
 const GENERATION_TIMEOUT_MS = 90000;
@@ -169,14 +168,13 @@ if (initialMode === "quant" || initialMode === "qual") {
 const $ = (selector) => document.querySelector(selector);
 
 function getSavedKey(provider = state.provider) {
-  const saved = localStorage.getItem(MODEL_CONFIG[provider].key);
-  if (saved) return saved;
-  // 用户未保存自己的 Key 时回退到内置默认 Key（开箱即用）
-  return DEFAULT_PROVIDER_KEYS[provider] || "";
+  return localStorage.getItem(MODEL_CONFIG[provider].key) || "";
 }
 
-function isUsingDefaultKey(provider = state.provider) {
-  return !localStorage.getItem(MODEL_CONFIG[provider].key) && !!DEFAULT_PROVIDER_KEYS[provider];
+// 判断当前 provider 是否走后端代理（未保存自己的 Key 且代理支持该 provider）
+function shouldUseProxy(provider = state.provider) {
+  const hasOwnKey = !!localStorage.getItem(MODEL_CONFIG[provider].key);
+  return !hasOwnKey && !!PROXY_PROVIDERS[provider];
 }
 
 function validateKeyFormat(key, provider) {
@@ -209,11 +207,13 @@ function validateKeyFormat(key, provider) {
 }
 
 function hasModelReady() {
+  // 走代理时直接判定为就绪（Key 在后端，前端不需要校验）
+  if (shouldUseProxy()) return true;
   const key = getSavedKey();
   return validateKeyFormat(key, state.provider) === null;
 }
 
-// 迁移逻辑：若当前 provider 既没保存 Key 也没有内置 Key，但 zhipu 有内置 Key，
+// 迁移逻辑：若当前 provider 既没保存 Key 也不支持代理，但 zhipu 支持代理，
 // 则自动切换到 zhipu，确保首次访问旧版本的用户也能开箱即用。
 function migrateToDefaultProvider() {
   const currentProvider = state.provider;
@@ -223,14 +223,16 @@ function migrateToDefaultProvider() {
     return;
   }
   const hasOwnKey = !!localStorage.getItem(MODEL_CONFIG[currentProvider].key);
-  const hasDefault = !!DEFAULT_PROVIDER_KEYS[currentProvider];
-  if (!hasOwnKey && !hasDefault && DEFAULT_PROVIDER_KEYS.zhipu) {
+  const proxySupported = !!PROXY_PROVIDERS[currentProvider];
+  if (!hasOwnKey && !proxySupported && PROXY_PROVIDERS.zhipu) {
     state.provider = "zhipu";
     localStorage.setItem("synthuser_provider", "zhipu");
   }
 }
 
 function validateApiConfig() {
+  // 走代理模式时不需要校验 Key 和 baseUrl（后端负责）
+  if (shouldUseProxy()) return null;
   const { baseUrl, model, key } = getApiConfig();
   const keyError = validateKeyFormat(key, state.provider);
   if (keyError) return keyError;
@@ -1164,29 +1166,35 @@ async function callAI(prompt, onProgress) {
   if (configError) throw new Error(configError);
 
   const { baseUrl, model, key } = getApiConfig();
+  const useProxy = shouldUseProxy();
   state.abortController = new AbortController();
   const timeoutId = window.setTimeout(() => {
     state.abortController?.abort("timeout");
   }, GENERATION_TIMEOUT_MS);
 
+  // 构造请求 URL / headers / body（代理模式不暴露 Key）
+  const requestUrl = useProxy ? "/api/chat" : baseUrl;
+  const headers = useProxy
+    ? { "Content-Type": "application/json" }
+    : { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" };
+  const requestBody = {
+    model: model,
+    messages: [
+      { role: "system", content: "你是一位专业的市场研究专家，擅长消费者行为分析。请严格按照用户要求的格式输出，只输出JSON，不要输出任何其他解释文字。" },
+      { role: "user", content: prompt }
+    ],
+    temperature: 0.8,
+    max_tokens: 4000,
+    stream: true
+  };
+  if (useProxy) requestBody.provider = state.provider;
+
   let response;
   try {
-    response = await fetch(baseUrl, {
+    response = await fetch(requestUrl, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${key}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: [
-          { role: "system", content: "你是一位专业的市场研究专家，擅长消费者行为分析。请严格按照用户要求的格式输出，只输出JSON，不要输出任何其他解释文字。" },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.8,
-        max_tokens: 4000,
-        stream: true
-      }),
+      headers: headers,
+      body: JSON.stringify(requestBody),
       signal: state.abortController.signal
     });
   } catch (networkError) {
@@ -1199,18 +1207,25 @@ async function callAI(prompt, onProgress) {
       throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请稍后重试，或返回修改研究内容后重新生成。");
     }
     // 网络请求失败（DNS、连接被拒绝、CORS 等）
-    throw new Error("网络请求失败：无法连接到模型服务。可能原因：1）API 地址错误；2）网络不通；3）浏览器 CORS 限制。请检查「模型设置」中的 Base URL 是否正确。");
+    throw new Error(useProxy
+      ? "网络请求失败：无法连接到代理服务 /api/chat。请检查站点是否正确部署了 Cloudflare Pages Functions（functions/api/chat.js）。"
+      : "网络请求失败：无法连接到模型服务。可能原因：1）API 地址错误；2）网络不通；3）浏览器 CORS 限制。请检查「模型设置」中的 Base URL 是否正确。"
+    );
   }
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
     let friendlyMsg = "";
     if (response.status === 401) {
-      friendlyMsg = "API Key 无效或已过期。请检查「模型设置」中的 API Key 是否正确，或前往对应平台重新生成 Key。";
+      friendlyMsg = useProxy
+        ? "代理返回 401：后端环境变量里的 API Key 无效或已过期。请检查 Cloudflare Pages → Settings → Environment variables 中的 ZHIPU_API_KEY。"
+        : "API Key 无效或已过期。请检查「模型设置」中的 API Key 是否正确，或前往对应平台重新生成 Key。";
     } else if (response.status === 403) {
       friendlyMsg = "无权限访问该模型。可能原因：Key 没有对应模型的调用权限，或账户余额不足。请检查模型平台的账户状态。";
     } else if (response.status === 429) {
       friendlyMsg = "请求过于频繁，已达到模型平台的速率限制。请稍等片刻后重试。";
+    } else if (response.status === 500 && useProxy) {
+      friendlyMsg = `代理服务出错（500）。响应内容：${errorText.slice(0, 200)}。请确认已在 Cloudflare Pages 配置了 ZHIPU_API_KEY 环境变量。`;
     } else if (response.status >= 500 && response.status < 600) {
       friendlyMsg = `模型服务暂时不可用（错误 ${response.status}）。这是模型提供方的问题，请稍后重试。`;
     } else if (response.status === 400) {
@@ -2035,13 +2050,13 @@ function KeyValidationHint() {
 }
 
 function DefaultKeyBanner() {
-  if (!isUsingDefaultKey()) return "";
+  if (!shouldUseProxy()) return "";
   return `
     <div class="default-key-banner">
-      <div class="banner-icon">🔑</div>
+      <div class="banner-icon">🔒</div>
       <div class="banner-text">
-        <strong>正在使用内置默认 Key（开箱即用）</strong>
-        <span>当前 ${escapeHtml(MODEL_CONFIG[state.provider].name)} 使用项目内置的体验 Key，适合轻度试用。如需长期或大量调用，请在上方填入你自己的 API Key 并保存。</span>
+        <strong>当前通过后端代理调用（无需配置 Key）</strong>
+        <span>当前 ${escapeHtml(MODEL_CONFIG[state.provider].name)} 的 API Key 由站点后端 /api/chat 代管，保存在 Cloudflare 环境变量里，前端不会暴露。如需用自己的 Key，可在下方填入并保存。</span>
       </div>
     </div>
   `;
@@ -2051,8 +2066,11 @@ function SettingsPage() {
   const config = MODEL_CONFIG[state.provider];
   if (!state.apiKey) state.apiKey = getSavedKey();
   const key = state.apiKey.trim() || getSavedKey();
-  const validationError = key ? validateKeyFormat(key, state.provider) : null;
+  const useProxy = shouldUseProxy();
+  const validationError = useProxy ? null : (key ? validateKeyFormat(key, state.provider) : null);
   const isValid = !validationError;
+  const statusText = useProxy ? "✅ 代理可用" : (key ? (isValid ? "✅ 格式有效" : "⚠️ 格式异常") : "待设置");
+  const statusStyle = useProxy ? 'background:#3b82f6;color:#fff;' : (isValid ? 'background:#2EB75B;color:#fff;' : key ? 'background:#E8534A;color:#fff;' : '');
   return `
     <section class="container">
       <div class="headline">
@@ -2066,8 +2084,8 @@ function SettingsPage() {
           <div class="provider-grid">
             ${Object.entries(MODEL_CONFIG).map(([key, item]) => {
               const hasOwnKey = !!localStorage.getItem(item.key);
-              const hasDefault = !!DEFAULT_PROVIDER_KEYS[key];
-              const status = hasOwnKey ? "已保存 Key" : (hasDefault ? "内置 Key" : "未保存 Key");
+              const proxySupported = !!PROXY_PROVIDERS[key];
+              const status = hasOwnKey ? "已保存 Key" : (proxySupported ? "代理可用" : "未保存 Key");
               return `
               <button class="provider-card ${state.provider === key ? "active" : ""}" data-provider="${key}">
                 <strong>${item.name}</strong>
@@ -2080,12 +2098,12 @@ function SettingsPage() {
         </section>
         <section class="panel">
           <div class="section-title">
-            <div><h2>${config.name}</h2><p>Key 只保存在本地浏览器。不设置 API Key 则无法生成真实结果。</p></div>
-            <span class="status-pill" style="${isValid ? 'background:#2EB75B;color:#fff;' : key ? 'background:#E8534A;color:#fff;' : ''}">${key ? (isValid ? "✅ 格式有效" : "⚠️ 格式异常") : "待设置"}</span>
+            <div><h2>${config.name}</h2><p>${useProxy ? "当前未保存自己的 Key，将通过后端代理 /api/chat 调用。" : "Key 只保存在本地浏览器。不设置 API Key 则无法生成真实结果。"}</p></div>
+            <span class="status-pill" style="${statusStyle}">${statusText}</span>
           </div>
           <div class="form-grid">
             <div class="field">
-              <label for="api-key">API Key ${isUsingDefaultKey() ? '<span class="default-key-tag">内置</span>' : ""}</label>
+              <label for="api-key">API Key ${useProxy ? '<span class="default-key-tag">代理</span>' : ""}</label>
               <div class="input-action">
                 <input id="api-key" type="${state.showKey ? "text" : "password"}" value="${escapeHtml(state.apiKey)}" placeholder="${config.placeholder}" />
                 <button class="ghost" data-action="toggle-key">${state.showKey ? "隐藏" : "显示"}</button>
