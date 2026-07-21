@@ -213,6 +213,23 @@ function hasModelReady() {
   return validateKeyFormat(key, state.provider) === null;
 }
 
+// 迁移逻辑：若当前 provider 既没保存 Key 也没有内置 Key，但 zhipu 有内置 Key，
+// 则自动切换到 zhipu，确保首次访问旧版本的用户也能开箱即用。
+function migrateToDefaultProvider() {
+  const currentProvider = state.provider;
+  if (!MODEL_CONFIG[currentProvider]) {
+    state.provider = "zhipu";
+    localStorage.setItem("synthuser_provider", "zhipu");
+    return;
+  }
+  const hasOwnKey = !!localStorage.getItem(MODEL_CONFIG[currentProvider].key);
+  const hasDefault = !!DEFAULT_PROVIDER_KEYS[currentProvider];
+  if (!hasOwnKey && !hasDefault && DEFAULT_PROVIDER_KEYS.zhipu) {
+    state.provider = "zhipu";
+    localStorage.setItem("synthuser_provider", "zhipu");
+  }
+}
+
 function validateApiConfig() {
   const { baseUrl, model, key } = getApiConfig();
   const keyError = validateKeyFormat(key, state.provider);
@@ -2452,6 +2469,7 @@ function render() {
   $("#app").innerHTML = App();
 }
 
+migrateToDefaultProvider();
 render();
 bindEvents();
 

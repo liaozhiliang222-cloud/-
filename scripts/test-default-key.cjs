@@ -40,7 +40,8 @@ return {
   state,
   getSavedKey,
   isUsingDefaultKey,
-  validateKeyFormat
+  validateKeyFormat,
+  migrateToDefaultProvider
 };
 `;
 
@@ -119,6 +120,32 @@ check('清除 Key 后又回退到内置 Key',
 check('内置 Key 通过校验',
   api.validateKeyFormat(api.DEFAULT_PROVIDER_KEYS.zhipu, 'zhipu'),
   null
+);
+
+// Test 12: 模拟旧版本用户：localStorage 里 provider=kimi，且没保存 kimi Key
+// 此时应该被 migrateToDefaultProvider 切换到 zhipu
+global.localStorage.setItem('synthuser_provider', 'kimi');
+// 不设置 kimi 的 key
+const freshSandbox = new Function(moduleCode);
+const freshApi = freshSandbox();
+freshApi.migrateToDefaultProvider();
+check('旧版本 kimi 用户迁移到 zhipu',
+  freshApi.state.provider,
+  'zhipu'
+);
+check('迁移后 localStorage 同步更新',
+  global.localStorage.getItem('synthuser_provider'),
+  'zhipu'
+);
+
+// Test 13: 已保存自己 Key 的 kimi 用户不应被迁移
+global.localStorage.setItem('synthuser_provider', 'kimi');
+global.localStorage.setItem('synthuser_api_key_kimi', 'sk-user-own-kimi-key-1234567890123');
+const freshApi2 = new Function(moduleCode)();
+freshApi2.migrateToDefaultProvider();
+check('kimi 已保存 Key 时不迁移',
+  freshApi2.state.provider,
+  'kimi'
 );
 
 // 输出测试报告
