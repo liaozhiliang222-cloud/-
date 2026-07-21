@@ -1484,38 +1484,126 @@ ${questions}
    - **rationale 数组**：为每道题单独提供一条"比例分布说明"，用于证明数据分布可信。每条必须包含：
      * questionIndex：题目序号（从 0 开始）
      * reasoning：${state.quantQuestions.length > 20 ? "30-60 字简要说明，引用人群画像或分布形态的关键数字" : "80-150 字说明，需引用：1）人群画像 / 配额特征如何影响该题分布；2）该题与其他题的内在一致性（如\"重视健康的人购买意愿更高\"）；3）分布形态的商业逻辑（如\"前两选项合计 73% 反映主流选择集中度\"）。拒绝空洞表述，必须落到具体数字和画像特征上。"}
-   顺序与 questions 数组一一对应。
+   顺序与 results 数组一一对应。
 
 ## 输出格式
-请严格按以下JSON格式输出（不要包含markdown代码块标记，直接输出JSON）：
+请严格按以下精简JSON格式输出（不要包含markdown代码块标记，直接输出JSON）。
+**重要：不要重复题目原文、题型、选项列表，只需返回模拟数值，用 i 标识题号（从0开始）：**
 
 {
-  "questions": [
-    {
-      "text": "题目原文",
-      "type": "single|multiple|scale|matrix",
-      "optionsArray": ["选项A", "选项B"],
-      "values": [42, 31, 17, 10]
-    }
+  "results": [
+    {"i": 0, "v": [42, 31, 17, 10]},
+    {"i": 1, "v": [58, 46, 34, 28]},
+    {"i": 2, "dist": [8, 15, 25, 35, 17], "mean": 3.2, "sd": 1.1},
+    {"i": 3, "mx": [{"m": 4.1, "d": [5, 10, 15, 30, 40]}, {"m": 3.5, "d": [10, 15, 25, 30, 20]}]}
   ],
   "analysis": {
-    "summary": "分析摘要",
+    "summary": "分析摘要（200字以内）",
     "findings": ["关键发现1", "关键发现2"],
-    "crosstab": [
-      ["维度A", "维度B描述", "百分比"]
-    ],
+    "crosstab": [["维度A", "维度B描述", "百分比"]],
     "rationale": [
-      {"questionIndex": 0, "reasoning": "该题分布说明，结合人群画像、配额、内在一致性与商业逻辑"}
+      {"questionIndex": 0, "reasoning": "该题分布说明"}
     ]
   }
 }
 
-注意：
-- single/multiple 类型的 optionsArray 是选项列表，values 是对应百分比
-- scale 类型的 optionsArray 为空，distribution 为各分值频数（见下方），mean 为均值，sd 为标准差
-- matrix 类型的 matrix 字段为数组，每个元素有 row（维度名）、mean（均值）、distribution（分布）
+字段说明：
+- results 数组与上方问卷结构一一对应，i 为题目序号（从0开始）
+- 单选/多选题：只返回 v（各选项百分比数组，单选和为100%，多选可超100%）
+- 量表题：返回 dist（各分值频数，和为100%）、mean（均值）、sd（标准差）
+- 矩阵题：返回 mx（数组，每个维度对应 m=均值, d=分布），维度顺序与输入一致
+- analysis.rationale 的 questionIndex 与 results 的 i 对应，每题一条`;
+}
 
-请为每道题输出完整的数据结构。`;
+// 将 AI 精简输出（results 数组）与 state.quantQuestions 合并，重建完整 result 对象
+// 兼容新旧两种格式：新格式用 results + 精简字段，旧格式用 questions + 完整字段
+function mergeQuantResults(parsed) {
+  // 旧格式兼容：如果 AI 返回了 questions 且带 text/type/optionsArray，直接用
+  if (parsed.questions && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+    // 补全缺失字段（与旧逻辑一致）
+    parsed.questions.forEach((q, i) => {
+      const sq = state.quantQuestions[i];
+      if (!q.text && sq) q.text = sq.text;
+      if (!q.type && sq) q.type = sq.type;
+      if (!q.scale && sq) q.scale = sq.scale;
+      if (!q.rows && sq) q.rows = sq.rows;
+      if ((!q.optionsArray || q.optionsArray.length === 0) && sq) {
+        if (q.type === "single" || q.type === "multiple") {
+          q.optionsArray = splitList(sq.options);
+        } else {
+          q.optionsArray = [];
+        }
+      }
+      q.index = i;
+    });
+    return parsed;
+  }
+
+  // 新格式：从 results 数组重建
+  const rawResults = parsed.results || [];
+  // 支持按 i 索引或按顺序排列
+  const resultMap = {};
+  rawResults.forEach((r, idx) => {
+    const i = typeof r.i === "number" ? r.i : idx;
+    resultMap[i] = r;
+  });
+
+  const questions = state.quantQuestions.map((sq, i) => {
+    const r = resultMap[i] || {};
+    const base = { text: sq.text, type: sq.type, scale: sq.scale, rows: sq.rows, index: i };
+
+    if (sq.type === "scale") {
+      const scaleMax = parseInt(sq.scale?.split("-")[1] || "5");
+      const dist = r.dist || r.distribution || Array.from({ length: scaleMax }, () => Math.round(100 / scaleMax));
+      // 归一化分布到 100
+      const distSum = dist.reduce((a, b) => a + b, 0);
+      const normalizedDist = distSum > 0 ? dist.map((v) => Math.round(v * 100 / distSum)) : dist;
+      // 修正取整误差
+      if (normalizedDist.length > 0) {
+        const diff = 100 - normalizedDist.reduce((a, b) => a + b, 0);
+        normalizedDist[normalizedDist.length - 1] += diff;
+      }
+      const mean = r.mean != null ? Number(r.mean) : (dist.reduce((s, v, idx) => s + v * (idx + 1), 0) / 100);
+      const sd = r.sd != null ? r.sd : "1.0";
+      return { ...base, optionsArray: [], distribution: normalizedDist, mean: String(mean), sd: String(sd) };
+    }
+
+    if (sq.type === "matrix") {
+      const rowNames = splitList(sq.rows);
+      const mx = r.mx || r.matrix || [];
+      const matrix = rowNames.map((rowName, ri) => {
+        const m = mx[ri] || {};
+        const mean = m.m != null ? m.m : (m.mean != null ? m.mean : "3.0");
+        const d = m.d || m.distribution || [];
+        const scaleMax = parseInt(sq.scale?.split("-")[1] || "5");
+        const dist = d.length > 0 ? d : Array.from({ length: scaleMax }, () => Math.round(100 / scaleMax));
+        const distSum = dist.reduce((a, b) => a + b, 0);
+        const normalizedDist = distSum > 0 ? dist.map((v) => Math.round(v * 100 / distSum)) : dist;
+        if (normalizedDist.length > 0) {
+          const diff = 100 - normalizedDist.reduce((a, b) => a + b, 0);
+          normalizedDist[normalizedDist.length - 1] += diff;
+        }
+        return { row: rowName, mean: String(mean), distribution: normalizedDist };
+      });
+      return { ...base, optionsArray: [], matrix };
+    }
+
+    // 单选/多选
+    const opts = splitList(sq.options);
+    let values = r.v || r.values || opts.map(() => Math.round(100 / opts.length));
+    // 单选归一化到 100，多选不归一化
+    if (sq.type === "single") {
+      const sum = values.reduce((a, b) => a + b, 0);
+      if (sum > 0 && sum !== 100) {
+        values = values.map((v) => Math.round(v * 100 / sum));
+        const diff = 100 - values.reduce((a, b) => a + b, 0);
+        values[values.length - 1] += diff;
+      }
+    }
+    return { ...base, optionsArray: opts, values };
+  });
+
+  return { questions, analysis: parsed.analysis || { summary: "", findings: [], crosstab: [], rationale: [] } };
 }
 
 async function callAI(prompt, onProgress) {
@@ -2016,33 +2104,14 @@ async function startGeneration() {
         };
       }
     } else {
-      if (!parsed.questions || !Array.isArray(parsed.questions) || parsed.questions.length === 0) {
-        throw new Error("AI 返回的数据缺少 questions 字段");
+      // 定量模式：支持新精简格式（results）和旧完整格式（questions）
+      if ((!parsed.results || !Array.isArray(parsed.results) || parsed.results.length === 0) &&
+          (!parsed.questions || !Array.isArray(parsed.questions) || parsed.questions.length === 0)) {
+        throw new Error("AI 返回的数据缺少 results 或 questions 字段");
       }
-      // 确保每个 question 有正确的数据结构
-      parsed.questions.forEach((q, i) => {
-        if (!q.optionsArray) {
-          if (q.type === "single" || q.type === "multiple") {
-            const opts = state.quantQuestions[i]?.options?.split(/[,，、]/) || ["选项A", "选项B"];
-            q.optionsArray = opts.map((o) => o.trim()).filter(Boolean);
-          } else {
-            q.optionsArray = [];
-          }
-        }
-        if (!q.values && q.type !== "scale" && q.type !== "matrix") {
-          q.values = q.optionsArray.map(() => Math.round(100 / q.optionsArray.length));
-        }
-        if (q.type === "scale" && !q.distribution) {
-          const scaleMax = parseInt(q.scale?.split("-")[1] || "5");
-          q.distribution = Array.from({ length: scaleMax }, (_, i) => Math.round(100 / scaleMax));
-          if (!q.mean) q.mean = (scaleMax + 1) / 2;
-          if (!q.sd) q.sd = "1.0";
-        }
-        if (q.type === "matrix" && !q.matrix) {
-          const rows = state.quantQuestions[i]?.rows?.split(/[,，、]/) || ["维度A"];
-          q.matrix = rows.map((r) => ({ row: r.trim(), mean: "3.0", distribution: [20, 20, 20, 20, 20] }));
-        }
-      });
+      // 合并 AI 精简输出与本地问卷结构，重建完整 result
+      parsed = mergeQuantResults(parsed);
+      // 确保有 analysis 字段
       if (!parsed.analysis) {
         parsed.analysis = {
           summary: "AI 生成分析摘要时中断，请重新生成。",
