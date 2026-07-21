@@ -11,7 +11,7 @@ const PROXY_PROVIDERS = {
   zhipu: { envKey: "ZHIPU_API_KEY" }
 };
 
-const GENERATION_TIMEOUT_MS = 90000;
+const GENERATION_TIMEOUT_MS = 180000;
 
 const templates = [
   {
@@ -1483,8 +1483,7 @@ ${questions}
    - 2-3组交叉分析（例如"高健康重视度 vs 购买意愿"）
    - **rationale 数组**：为每道题单独提供一条"比例分布说明"，用于证明数据分布可信。每条必须包含：
      * questionIndex：题目序号（从 0 开始）
-     * reasoning：80-150 字说明，需引用：1）人群画像 / 配额特征如何影响该题分布；2）该题与其他题的内在一致性（如"重视健康的人购买意愿更高"）；3）分布形态的商业逻辑（如"前两选项合计 73% 反映主流选择集中度"）。
-     拒绝空洞表述，必须落到具体数字和画像特征上。
+     * reasoning：${state.quantQuestions.length > 20 ? "30-60 字简要说明，引用人群画像或分布形态的关键数字" : "80-150 字说明，需引用：1）人群画像 / 配额特征如何影响该题分布；2）该题与其他题的内在一致性（如\"重视健康的人购买意愿更高\"）；3）分布形态的商业逻辑（如\"前两选项合计 73% 反映主流选择集中度\"）。拒绝空洞表述，必须落到具体数字和画像特征上。"}
    顺序与 questions 数组一一对应。
 
 ## 输出格式
@@ -1542,7 +1541,7 @@ async function callAI(prompt, onProgress) {
       { role: "user", content: prompt }
     ],
     temperature: 0.8,
-    max_tokens: 4000,
+    max_tokens: Math.min(16000, 2000 + state.quantQuestions.length * 250),
     stream: true
   };
   if (useProxy) requestBody.provider = state.provider;
@@ -2004,6 +2003,47 @@ function copyAnalysis() {
   if (!state.result) return;
   const text = state.mode === "qual" ? qualAnalysisMarkdown() : quantAnalysisMarkdown();
   navigator.clipboard.writeText(text).then(() => toast("分析报告已复制"));
+}
+
+// 下载文件到本地
+function downloadFile(filename, content, mimeType = "text/plain;charset=utf-8") {
+  const blob = new Blob(["\uFEFF" + content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+// 导出 CSV 文件（统计汇总）
+function exportCsv() {
+  if (!state.result) return;
+  const csv = quantCsv();
+  const date = new Date().toISOString().slice(0, 10);
+  downloadFile(`问卷统计结果_${date}.csv`, csv, "text/csv;charset=utf-8");
+  toast("CSV 文件已下载");
+}
+
+// 导出分析报告 Markdown
+function exportMarkdown() {
+  if (!state.result) return;
+  const md = state.mode === "qual" ? qualMarkdown() : quantAnalysisMarkdown();
+  const date = new Date().toISOString().slice(0, 10);
+  const prefix = state.mode === "qual" ? "访谈笔录" : "问卷分析报告";
+  downloadFile(`${prefix}_${date}.md`, md, "text/markdown;charset=utf-8");
+  toast("Markdown 文件已下载");
+}
+
+// 导出完整 JSON 数据
+function exportJson() {
+  if (!state.result) return;
+  const json = JSON.stringify(state.result, null, 2);
+  const date = new Date().toISOString().slice(0, 10);
+  downloadFile(`问卷完整数据_${date}.json`, json, "application/json;charset=utf-8");
+  toast("JSON 数据已下载");
 }
 
 function qualMarkdown() {
@@ -2559,6 +2599,7 @@ function QualResultPage() {
       ${ResultTabs()}
       ${state.resultTab === "primary" ? QualTranscripts() : ""}
       ${state.resultTab === "analysis" ? QualAnalysis() : ""}
+      ${ExportPanel("qual")}
     </section>
   `;
 }
@@ -2576,6 +2617,7 @@ function QuantResultPage() {
       ${ResultTabs()}
       ${state.resultTab === "primary" ? QuantStats() : ""}
       ${state.resultTab === "analysis" ? QuantAnalysis() : ""}
+      ${ExportPanel("quant")}
     </section>
   `;
 }
@@ -2685,14 +2727,24 @@ function QuantAnalysis() {
 }
 
 function ExportPanel(type) {
-  const items = type === "qual"
-    ? ["访谈笔录 Markdown", "归纳分析 Markdown", "Word 报告结构预览", "PPT 洞察页大纲"]
-    : ["原始样本 CSV", "统计汇总 CSV", "交叉表预览", "分析摘要 Markdown"];
+  if (type === "qual") {
+    return `
+    <section class="panel">
+      <div class="section-title"><div><h2>导出数据</h2><p>点击下载对应格式的文件到本地。</p></div></div>
+      <div class="export-grid">
+        <button class="export-card" data-action="export-md"><strong>访谈笔录 Markdown</strong><span>下载 MD 文件</span></button>
+        <button class="export-card" data-action="copy-analysis"><strong>归纳分析报告</strong><span>复制到剪贴板</span></button>
+      </div>
+    </section>
+    `;
+  }
   return `
     <section class="panel">
-      <div class="section-title"><div><h2>导出</h2><p>原型阶段用复制到剪贴板模拟文件导出，后续可接 Word / PPT / Excel / PDF。</p></div></div>
+      <div class="section-title"><div><h2>导出数据</h2><p>点击下载对应格式的文件到本地。</p></div></div>
       <div class="export-grid">
-        ${items.map((item, index) => `<button class="export-card" data-action="${index < 2 ? (index === 0 ? "copy" : "copy-analysis") : "copy-analysis"}"><strong>${item}</strong><span>复制到剪贴板</span></button>`).join("")}
+        <button class="export-card" data-action="export-csv"><strong>统计汇总 CSV</strong><span>下载 CSV 文件</span></button>
+        <button class="export-card" data-action="export-md"><strong>分析报告 Markdown</strong><span>下载 MD 文件</span></button>
+        <button class="export-card" data-action="export-json"><strong>完整数据 JSON</strong><span>下载 JSON 文件</span></button>
       </div>
     </section>
   `;
@@ -2798,6 +2850,9 @@ function bindEvents() {
     }
     if (action === "copy") copyResult();
     if (action === "copy-analysis") copyAnalysis();
+    if (action === "export-csv") exportCsv();
+    if (action === "export-md") exportMarkdown();
+    if (action === "export-json") exportJson();
     if (action === "regenerate") {
       state.generateError = "";
       if (state.result?.isMock) startMockGeneration();
