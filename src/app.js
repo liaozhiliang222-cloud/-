@@ -273,7 +273,18 @@ function toast(message, duration = 1800) {
 
 function syncResearchForm() {
   const topic = $("#topic");
-  if (topic) state.topic = topic.value;
+  if (topic) {
+    state.topic = topic.value;
+    // 研究主题为空时，自动从问卷首题推导兜底主题并回填输入框
+    // 这样用户能看到自动填入的主题，且不会被后续 input 事件清空
+    if (!state.topic.trim()) {
+      const fallback = deriveTopicFromQuestions();
+      if (fallback) {
+        state.topic = fallback;
+        topic.value = fallback;
+      }
+    }
+  }
   const sampleSize = $("#sample-size");
   if (sampleSize) state.sampleSize = Math.max(50, Math.min(500, Number(sampleSize.value || 100)));
   const outline = $("#outline-text");
@@ -315,12 +326,9 @@ function syncSettingsForm() {
 }
 
 function hasResearchReady() {
-  // 研究主题为空时，若已配置问卷题目，自动用首题文本兜底为主题（避免导入问卷后按钮无法点击）
-  if (!state.topic.trim()) {
-    const fallback = deriveTopicFromQuestions();
-    if (!fallback) return false;
-    state.topic = fallback;
-  }
+  // 研究主题为空时，尝试用问卷首题兜底（只读，不写回 state——回填由 syncResearchForm 负责）
+  const topic = state.topic.trim() || deriveTopicFromQuestions();
+  if (!topic) return false;
   if (state.mode === "qual") {
     return state.qualQuestions.every((q) => q.trim());
   }
