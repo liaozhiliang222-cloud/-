@@ -1549,7 +1549,10 @@ async function callAI(prompt, onProgress) {
       { role: "user", content: prompt }
     ],
     temperature: 0.8,
-    max_tokens: Math.min(16000, 2000 + state.quantQuestions.length * 250),
+    // 动态计算 max_tokens：定性模式固定 8000，定量模式按题数计算
+    max_tokens: state.mode === "qual"
+      ? 8000
+      : Math.min(32000, 4000 + state.quantQuestions.length * 400),
     stream: true
   };
   if (useProxy) requestBody.provider = state.provider;
@@ -1668,13 +1671,81 @@ async function callAI(prompt, onProgress) {
 }
 
 function extractJSON(text) {
-  // 尝试从文本中提取 JSON
+  if (!text || typeof text !== "string") return text;
+  // 1. 去掉 markdown 代码块标记（```json ... ``` 或 ``` ... ```）
+  const codeBlockMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (codeBlockMatch) {
+    text = codeBlockMatch[1];
+  }
+  // 2. 尝试从文本中提取最外层 JSON 对象（用括号配平，而非简单的首尾花括号）
   const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start !== -1 && end !== -1 && end > start) {
+  if (start === -1) return text;
+  // 从第一个 { 开始，用括号深度配平找到匹配的 }
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let end = -1;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end !== -1) {
     return text.slice(start, end + 1);
   }
-  return text;
+  // 3. 括号未配平（JSON 可能被截断）：尝试补全缺失的右括号
+  let truncated = text.slice(start);
+  // 统计未闭合的括号
+  let openBraces = 0, openBrackets = 0;
+  inString = false; escape = false;
+  for (const ch of truncated) {
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") openBraces++;
+    else if (ch === "}") openBraces--;
+    else if (ch === "[") openBrackets++;
+    else if (ch === "]") openBrackets--;
+  }
+  // 如果最后一个字符是不完整的键值（如逗号后截断），去掉不完整部分
+  // 找最后一个完整的 } 或 ] 或 " 或 数字
+  const lastComplete = Math.max(
+    truncated.lastIndexOf("}"),
+    truncated.lastIndexOf("]"),
+    truncated.lastIndexOf('"'),
+    truncated.lastIndexOf(",")
+  );
+  if (lastComplete > 0 && lastComplete < truncated.length - 1) {
+    // 截断到最后一个完整元素后
+    truncated = truncated.slice(0, lastComplete + 1);
+    // 重新统计括号
+    openBraces = 0; openBrackets = 0;
+    inString = false; escape = false;
+    for (const ch of truncated) {
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{") openBraces++;
+      else if (ch === "}") openBraces--;
+      else if (ch === "[") openBrackets++;
+      else if (ch === "]") openBrackets--;
+    }
+    // 去掉尾部逗号
+    truncated = truncated.replace(/,\s*$/, "");
+  }
+  // 补全缺失的右括号
+  for (let i = 0; i < openBrackets; i++) truncated += "]";
+  for (let i = 0; i < openBraces; i++) truncated += "}";
+  return truncated;
 }
 
 function makeQualResult() {
@@ -1912,7 +1983,16 @@ async function startGeneration() {
       parsed = JSON.parse(jsonText);
     } catch (e) {
       console.error("JSON 解析失败，原始内容:", fullContent);
-      throw new Error("AI 返回格式不正确，请重试。原始内容已输出到控制台。");
+      console.error("提取的 JSON:", jsonText.slice(0, 500));
+      // 提供更有用的错误信息
+      const contentLen = fullContent.length;
+      const jsonLen = jsonText.length;
+      const isTruncated = !jsonText.trim().endsWith("}") && !jsonText.trim().endsWith("]");
+      throw new Error(
+        isTruncated
+          ? `AI 返回的内容被截断（${contentLen} 字符），可能是 max_tokens 不足。请减少题目数量后重试，或联系管理员调整配置。`
+          : `AI 返回格式不正确（${jsonLen} 字符）。请重试，原始内容已输出到控制台。`
+      );
     }
 
     // 验证数据结构

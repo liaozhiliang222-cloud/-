@@ -1,4 +1,4 @@
-const APP_VERSION = "43";
+const APP_VERSION = "44";
 const CACHE_NAME = `synthuser-pwa-v${APP_VERSION}`;
 const ASSETS = [
   "/index.html",
