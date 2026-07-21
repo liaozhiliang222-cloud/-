@@ -60,6 +60,15 @@ export async function onRequestPost({ request, env }) {
     );
   }
 
+  // 构造上游请求体
+  const upstreamBody = {
+    model: body.model,
+    messages: body.messages,
+    temperature: body.temperature ?? 0.8,
+    max_tokens: body.max_tokens ?? 4000,
+    stream: !!body.stream
+  };
+
   // 转发到上游
   let upstream;
   try {
@@ -70,13 +79,7 @@ export async function onRequestPost({ request, env }) {
         "Content-Type": "application/json",
         "Accept": body.stream ? "text/event-stream" : "application/json"
       },
-      body: JSON.stringify({
-        model: body.model,
-        messages: body.messages,
-        temperature: body.temperature ?? 0.8,
-        max_tokens: body.max_tokens ?? 4000,
-        stream: !!body.stream
-      })
+      body: JSON.stringify(upstreamBody)
     });
   } catch (upstreamError) {
     return jsonResponse(
@@ -85,14 +88,44 @@ export async function onRequestPost({ request, env }) {
     );
   }
 
-  // 流式响应：原样转发 ReadableStream
+  // 上游返回错误：转发错误信息
+  if (!upstream.ok) {
+    const errorText = await upstream.text().catch(() => "");
+    return jsonResponse(
+      { error: `上游返回错误 ${upstream.status}: ${errorText.slice(0, 500)}` },
+      upstream.status
+    );
+  }
+
+  // 流式响应：用 TransformStream 确保数据持续流动，不被 Cloudflare 缓冲
+  // 关键：不能直接 return new Response(upstream.body)，因为 Cloudflare 可能会缓冲整个响应
+  // 用 TransformStream 逐块转发，确保每个 chunk 立即发送给客户端
   if (body.stream) {
-    return new Response(upstream.body, {
-      status: upstream.status,
+    const { readable, writable } = new TransformStream();
+    (async () => {
+      const reader = upstream.body.getReader();
+      const writer = writable.getWriter();
+      const encoder = new TextEncoder();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await writer.write(value);
+        }
+      } catch (streamErr) {
+        // 写入错误或客户端断开，静默处理
+      } finally {
+        await writer.close().catch(() => {});
+      }
+    })();
+
+    return new Response(readable, {
+      status: 200,
       headers: {
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
         ...CORS_HEADERS
       }
     });

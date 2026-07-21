@@ -1525,9 +1525,17 @@ async function callAI(prompt, onProgress) {
   const { baseUrl, model, key } = getApiConfig();
   const useProxy = shouldUseProxy();
   state.abortController = new AbortController();
-  const timeoutId = window.setTimeout(() => {
+  // 心跳超时：每次收到数据重置计时器，避免大问卷生成时因总时长超限被中断
+  // 首字节等待 120 秒（大模型处理长 prompt 需要时间），后续每 60 秒无数据才超时
+  let heartbeatTimer = window.setTimeout(() => {
     state.abortController?.abort("timeout");
-  }, GENERATION_TIMEOUT_MS);
+  }, 120000); // 首字节等待 120 秒
+  const resetHeartbeat = () => {
+    window.clearTimeout(heartbeatTimer);
+    heartbeatTimer = window.setTimeout(() => {
+      state.abortController?.abort("timeout");
+    }, 60000); // 后续 60 秒无数据则超时
+  };
 
   // 构造请求 URL / headers / body（代理模式不暴露 Key）
   const requestUrl = useProxy ? "/api/chat" : baseUrl;
@@ -1561,7 +1569,7 @@ async function callAI(prompt, onProgress) {
         abortError.name = "AbortError";
         throw abortError;
       }
-      throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请稍后重试，或返回修改研究内容后重新生成。");
+      throw new Error("模型响应超时（60 秒内无数据返回）。可能是模型正在处理大量题目、网络波动、或流式连接被中间层中断。建议：1）减少题目数量后重试；2）稍后重试；3）检查网络连接。");
     }
     // 网络请求失败（DNS、连接被拒绝、CORS 等）
     throw new Error(useProxy
@@ -1605,6 +1613,9 @@ async function callAI(prompt, onProgress) {
       const { done, value } = await reader.read();
       if (done) break;
 
+      // 每次收到数据重置心跳计时器，避免长文本生成被误超时
+      resetHeartbeat();
+
       const chunkText = decoder.decode(value, { stream: true });
       rawContent += chunkText;
       buffer += chunkText;
@@ -1636,11 +1647,11 @@ async function callAI(prompt, onProgress) {
         abortError.name = "AbortError";
         throw abortError;
       }
-      throw new Error("模型响应超时或已中断。可能是当前模型生成时间过长、网络不稳定，或接口没有正常结束流式响应。请稍后重试，或返回修改研究内容后重新生成。");
+      throw new Error("模型响应超时（60 秒内无数据返回）。可能是模型正在处理大量题目、网络波动、或流式连接被中间层中断。建议：1）减少题目数量后重试；2）稍后重试；3）检查网络连接。");
     }
     throw streamError;
   } finally {
-    window.clearTimeout(timeoutId);
+    window.clearTimeout(heartbeatTimer);
     state.abortController = null;
   }
 
