@@ -1481,10 +1481,13 @@ ${questions}
    - 一段200字以内的总结
    - 3-5条关键发现（每条具体、有洞察）
    - 2-3组交叉分析（例如"高健康重视度 vs 购买意愿"）
-   - **rationale 数组**：为每道题单独提供一条"比例分布说明"，用于证明数据分布可信。每条必须包含：
-     * questionIndex：题目序号（从 0 开始）
-     * reasoning：${state.quantQuestions.length > 20 ? "30-60 字简要说明，引用人群画像或分布形态的关键数字" : "80-150 字说明，需引用：1）人群画像 / 配额特征如何影响该题分布；2）该题与其他题的内在一致性（如\"重视健康的人购买意愿更高\"）；3）分布形态的商业逻辑（如\"前两选项合计 73% 反映主流选择集中度\"）。拒绝空洞表述，必须落到具体数字和画像特征上。"}
-   顺序与 results 数组一一对应。
+   - **rationale 数组**：只为核心需求/行为/态度题目提供比例分布说明，最多选10题。
+     跳过甄别题（题号以S开头）、背景信息题（题号以D开头或最后5-6题）、交通车辆拥有等纯客观题。
+     优先选择：使用行为、痛点需求、概念购买意愿、价格敏感度、功能偏好等有业务洞察价值的题目。
+     每条必须包含：
+     * questionIndex：题目序号（从 0 开始，对应 results 的 i）
+     * reasoning：${state.quantQuestions.length > 20 ? "40-80 字说明，引用该题分布的关键数字和人群画像特征" : "80-150 字说明，需引用：1）人群画像 / 配额特征如何影响该题分布；2）该题与其他题的内在一致性（如\"重视健康的人购买意愿更高\"）；3）分布形态的商业逻辑（如\"前两选项合计 73% 反映主流选择集中度\"）。拒绝空洞表述，必须落到具体数字和画像特征上。"}
+     只为选中的核心题目提供，数量控制在 5-10 条。
 
 ## 输出格式
 请严格按以下精简JSON格式输出（不要包含markdown代码块标记，直接输出JSON）。
@@ -1502,7 +1505,7 @@ ${questions}
     "findings": ["关键发现1", "关键发现2"],
     "crosstab": [["维度A", "维度B描述", "百分比"]],
     "rationale": [
-      {"questionIndex": 0, "reasoning": "该题分布说明"}
+      {"questionIndex": 14, "reasoning": "该题分布说明（仅核心需求/行为题）"}
     ]
   }
 }
@@ -1512,7 +1515,7 @@ ${questions}
 - 单选/多选题：只返回 v（各选项百分比数组，单选和为100%，多选可超100%）
 - 量表题：返回 dist（各分值频数，和为100%）、mean（均值）、sd（标准差）
 - 矩阵题：返回 mx（数组，每个维度对应 m=均值, d=分布），维度顺序与输入一致
-- analysis.rationale 的 questionIndex 与 results 的 i 对应，每题一条`;
+- analysis.rationale 只为核心需求/行为题目提供（5-10条），questionIndex 对应 results 的 i`;
 }
 
 // 将 AI 精简输出（results 数组）与 state.quantQuestions 合并，重建完整 result 对象
@@ -1932,7 +1935,23 @@ function makeQuantResult() {
   const scaleLabel = scaleQuestion?.text || "核心态度指标";
   const audSum = audienceSummary();
   const quaSum = quotaSummary();
-  const rationale = questions.map((q, i) => {
+  // 只为核心需求/行为题目生成 rationale（最多10题），跳过甄别题和背景信息题
+  const coreIndices = questions.map((q, i) => ({ q, i }))
+    .filter(({ q }) => {
+      // 跳过甄别题（题号以S开头或题号小于10的常见甄别区间）
+      const text = q.text || "";
+      // 跳过背景信息题
+      if (/^(D\d|S\d|D\.|背景信息|性别|学历|职业|收入|家庭结构|城市|年龄)/.test(text)) return false;
+      // 跳过纯客观拥有类题目
+      if (/^(您家目前总共拥有|您家.*品牌|您家.*价格|请问您拥有以下哪些交通)/.test(text)) return false;
+      // 保留使用行为、痛点、需求、概念、功能、价格相关
+      if (/(使用|痛点|需求|购买|功能|场景|安装|记录|拍摄|监控|期待|原因|处理|频率|搭载|遇到)/.test(text)) return true;
+      return false;
+    })
+    .slice(0, 10)
+    .map(({ i }) => i);
+  const rationale = coreIndices.map((i) => {
+    const q = questions[i];
     const head = `第 ${i + 1} 题（${q.text}）：`;
     let body = "";
     if (q.type === "single") {
