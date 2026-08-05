@@ -7,6 +7,7 @@
     "dev": "node scripts/serve.mjs",
     "preview": "node scripts/serve.mjs",
     "build": "node scripts/build.mjs",
+    "test": "node scripts/test-quota-core.mjs && node scripts/test-quant-core.mjs && node scripts/test-import-core.mjs",
     "deploy:cf": "wrangler pages deploy . --project-name=sym --branch=main",
     "deploy:cf:preview": "wrangler pages deploy . --project-name=sym --branch=preview"
   },

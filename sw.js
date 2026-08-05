@@ -1,4 +1,4 @@
-const APP_VERSION = "47";
+const APP_VERSION = "54";
 const CACHE_NAME = `synthuser-pwa-v${APP_VERSION}`;
 const ASSETS = [
   "/index.html",
@@ -10,6 +10,9 @@ const ASSETS = [
   "/icons/icon-maskable-512.png",
   "/icons/apple-touch-icon.png",
   `/src/app.js?v=${APP_VERSION}`,
+  `/src/quant-core.js?v=${APP_VERSION}`,
+  `/src/import-core.js?v=${APP_VERSION}`,
+  `/src/quota-core.js?v=${APP_VERSION}`,
   `/src/styles.css?v=${APP_VERSION}`
 ];
 
