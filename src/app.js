@@ -56,7 +56,7 @@ import {
   migrateQuestionData,
   optionsList,
   buildQuestionPromptFragment
-} from "./quant-core.js?v=54";
+} from "./quant-core.js?v=55";
 
 import {
   parseQuestionnaireText,
