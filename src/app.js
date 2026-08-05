@@ -503,7 +503,8 @@ function syncResearchForm() {
 
 // 从 DOM 读取结构化选项编辑器的全部选项（过滤空行）
 function optionRowsFromDom(index) {
-  return [...document.querySelectorAll(`[data-qopt="${index}"]`)].map((el) => el.value.trim()).filter(Boolean);
+  // 注意：选项行的 data-qopt 是 "题号:行号"（如 "0:2"），必须前缀匹配；空行保留占位避免索引错位
+  return [...document.querySelectorAll(`[data-qopt^="${index}:"]`)].map((el) => el.value.trim());
 }
 
 // 同步结构化选项到隐藏的 #q-options（逗号分隔，供生成/导出读取）
@@ -5673,6 +5674,7 @@ function bindEvents() {
     }
     // ===== v54 结构化选项编辑器（增/删/上移/下移） =====
     if (target.dataset.qoptUp !== undefined || target.dataset.qoptDown !== undefined || target.dataset.qoptDel !== undefined) {
+      syncResearchForm(); // 先把用户已输入的行同步进 state
       const [qi, oi] = (target.dataset.qoptUp ?? target.dataset.qoptDown ?? target.dataset.qoptDel).split(":").map(Number);
       const opts = optionRowsFromDom(qi);
       if (target.dataset.qoptUp !== undefined && oi > 0) {
@@ -5682,15 +5684,18 @@ function bindEvents() {
       } else if (target.dataset.qoptDel !== undefined) {
         opts.splice(oi, 1);
       }
-      syncHiddenOptions(qi, opts);
+      const q = state.quantQuestions[qi];
+      if (q) q.options = opts.join(", ");
       render();
       return;
     }
     if (target.dataset.qoptAdd !== undefined) {
+      syncResearchForm(); // 先把用户已输入的行同步进 state
       const qi = Number(target.dataset.qoptAdd);
       const opts = optionRowsFromDom(qi);
       opts.push(`选项${opts.length + 1}`);
-      syncHiddenOptions(qi, opts);
+      const q = state.quantQuestions[qi];
+      if (q) q.options = opts.join(", ");
       render();
       return;
     }
