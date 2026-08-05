@@ -1392,6 +1392,69 @@ check("buildQuantWorkbook 新增题型 Sheet 内容", () => {
   assert.ok(str.includes("数值/开放/定和"), "含高级题型 Sheet");
 });
 
+section("v54 深度解读支持新题型");
+
+check("buildQuestionInterpretationPrompt 新题型输出真实数据（非「未知题型」）", () => {
+  const merged = mergeRawResults([
+    rankOkResult,
+    { i: 1, type: "nps", distribution: [2, 3, 4, 5, 6, 8, 10, 14, 18, 16, 14], mean: 6.8 },
+    { i: 2, type: "numeric", mean: 3280, median: 3000, min: 500, max: 8000, p25: 2000, p75: 4500, distribution: [{ label: "低", pct: 18 }] },
+    { i: 3, type: "open", responseCount: 100, otherPct: 8, themes: [{ name: "续航", pct: 36, summary: "担心续航", quotes: ["q"] }] },
+    { i: 4, type: "allocation", totalPoints: 100, items: [
+      { optionIndex: 0, meanPoints: 32.5, medianPoints: 30 },
+      { optionIndex: 1, meanPoints: 25.8, medianPoints: 25 },
+      { optionIndex: 2, meanPoints: 22.1, medianPoints: 20 },
+      { optionIndex: 3, meanPoints: 19.6, medianPoints: 20 }
+    ] }
+  ], v54Questions);
+  const env = { topic: "t", audienceConfig: { age: "a", gender: "g", city: "c" }, sampleSize: 100, questions: merged };
+  const p0 = buildQuestionInterpretationPrompt(env, merged[0], [], { isMock: true });
+  assert.ok(p0.includes("平均排名 1.5"), "排序题提示词含平均排名");
+  assert.ok(p0.includes("名次分布"), "排序题提示词含名次分布");
+  assert.doesNotMatch(p0, /未知题型/, "不再输出「未知题型」");
+  const p1 = buildQuestionInterpretationPrompt(env, merged[1], [], { isMock: true });
+  assert.ok(p1.includes("NPS -8"), "NPS 提示词含 NPS 值");
+  const p2 = buildQuestionInterpretationPrompt(env, merged[2], [], { isMock: true });
+  assert.ok(p2.includes("中位数 3000"), "数值题提示词含中位数");
+  const p3 = buildQuestionInterpretationPrompt(env, merged[3], [], { isMock: true });
+  assert.ok(p3.includes("主题聚类"), "开放题提示词含主题聚类");
+  const p4 = buildQuestionInterpretationPrompt(env, merged[4], [], { isMock: true });
+  assert.ok(p4.includes("平均分配 32.5"), "定和分配提示词含均分");
+});
+
+check("buildRuleBasedInterpretation 新题型基础解读", () => {
+  const merged = mergeRawResults([
+    rankOkResult,
+    { i: 1, type: "nps", distribution: [2, 3, 4, 5, 6, 8, 10, 14, 18, 16, 14], mean: 6.8 },
+    { i: 2, type: "numeric", mean: 3280, median: 3000, min: 500, max: 8000, p25: 2000, p75: 4500, distribution: [] },
+    { i: 3, type: "open", responseCount: 100, otherPct: 8, themes: [
+      { name: "续航", pct: 36, summary: "s", quotes: [] },
+      { name: "价格", pct: 27, summary: "s2", quotes: [] },
+      { name: "品牌", pct: 21, summary: "s3", quotes: [] }
+    ] },
+    { i: 4, type: "allocation", totalPoints: 100, items: [
+      { optionIndex: 0, meanPoints: 40, medianPoints: 38 },
+      { optionIndex: 1, meanPoints: 30, medianPoints: 28 },
+      { optionIndex: 2, meanPoints: 20, medianPoints: 20 },
+      { optionIndex: 3, meanPoints: 10, medianPoints: 10 }
+    ] }
+  ], v54Questions);
+  const r0 = buildRuleBasedInterpretation(merged[0], v54Questions, { isMock: true });
+  assert.ok(r0 && r0.headline.includes("事故取证"), "排序题基础解读");
+  const r1 = buildRuleBasedInterpretation(merged[1], v54Questions, { isMock: true });
+  assert.ok(r1 && r1.headline.includes("NPS"), "NPS 基础解读");
+  const r2 = buildRuleBasedInterpretation(merged[2], v54Questions, { isMock: true });
+  assert.ok(r2 && r2.headline.includes("数值"), "数值题基础解读");
+  const r3 = buildRuleBasedInterpretation(merged[3], v54Questions, { isMock: true });
+  assert.ok(r3 && r3.headline.includes("续航"), "开放题基础解读");
+  const r4 = buildRuleBasedInterpretation(merged[4], v54Questions, { isMock: true });
+  assert.ok(r4 && r4.headline.includes("价格"), "定和分配基础解读（top1=价格40分）");
+  [r0, r1, r2, r3, r4].forEach((r) => {
+    assert.ok(r.observation.length > 20, "observation 满足长度要求");
+    assert.ok(r.evidence.length >= 1, "绑定证据");
+  });
+});
+
 // ===== 汇总 =====
 console.log(`\n========== 结果：${passed} 通过，${failed} 失败 ==========`);
 if (failed > 0) {

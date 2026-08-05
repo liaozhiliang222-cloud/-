@@ -2958,6 +2958,132 @@ function ruleInterpretMatrix(question, metrics) {
   };
 }
 
+// v54 新题型基础统计解读
+function ruleInterpretRank(question, metrics) {
+  if (!metrics.available) return null;
+  const top = metrics.ranked[0];
+  if (!top) return null;
+  const topOpt = question.optionsArray?.[top.optionIndex] || `选项${top.optionIndex + 1}`;
+  const headline = metrics.consistent
+    ? `「${topOpt}」整体排序最靠前，且首选优势明显`
+    : `「${topOpt}」整体排序最靠前，但存在少数用户强偏好`;
+  const obs = [
+    `「${topOpt}」平均排名 ${top.avgRank}，${Number.isFinite(Number(top.firstPct)) ? `${top.firstPct}% 的样本将其排在第一位` : "第一名比例数据缺失"}。`,
+    metrics.stableSecondary
+      ? `「${metrics.stableSecondary.label}」前三入选率高但第一名比例有限，属稳定次级需求。`
+      : `第一名与平均排名${metrics.consistent ? "一致" : "不一致"}。`,
+    metrics.isConcentrated ? "排名高度集中，首选明确。" : "排名较为分散，未见压倒性首选。"
+  ].join("");
+  return {
+    headline,
+    observation: obs,
+    possibleDrivers: [],
+    evidence: [
+      { questionIndex: question.index, label: `${topOpt}（平均排名）`, value: top.avgRank },
+      { questionIndex: question.index, label: `${topOpt}（第一名比例）`, value: Number.isFinite(Number(top.firstPct)) ? top.firstPct : 0 }
+    ],
+    implication: "",
+    confidence: "low",
+    caveat: "基础统计解读，仅描述数据表现，不代表因果结论。"
+  };
+}
+
+function ruleInterpretNps(question, metrics) {
+  if (!metrics.available) return null;
+  const headline = metrics.nps >= 30 ? `NPS ${metrics.nps}，推荐者显著领先`
+    : metrics.nps > 0 ? `NPS ${metrics.nps}，推荐者略多于贬损者`
+    : `NPS ${metrics.nps}，贬损者不弱于推荐者`;
+  const obs = [
+    `净推荐值 NPS 为 ${metrics.nps}（推荐者 ${metrics.promoter}% − 贬损者 ${metrics.detractor}%）。`,
+    `被动者占比 ${metrics.passive}%${metrics.passive >= 30 ? "，存在可观的转化空间" : "，规模适中"}。`,
+    metrics.nps < 0 ? "口碑现状偏负，需要优先解决贬损者的核心不满。" : "整体口碑处于可接受区间。"
+  ].join("");
+  return {
+    headline,
+    observation: obs,
+    possibleDrivers: [],
+    evidence: [
+      { questionIndex: question.index, label: "NPS", value: metrics.nps },
+      { questionIndex: question.index, label: "推荐者比例", value: metrics.promoter },
+      { questionIndex: question.index, label: "贬损者比例", value: metrics.detractor }
+    ],
+    implication: "",
+    confidence: "low",
+    caveat: "基础统计解读，仅描述数据表现，不代表因果结论。"
+  };
+}
+
+function ruleInterpretNumeric(question, metrics) {
+  if (!metrics.available) return null;
+  const headline = metrics.skew
+    ? `数值分布${metrics.skew}，均值与中位数存在偏离`
+    : `数值集中，均值与中位数接近`;
+  const obs = [
+    `均值 ${metrics.mean}${metrics.unit || ""}，中位数 ${metrics.median}${metrics.unit || ""}${metrics.skew ? `，${metrics.skew}` : "，分布对称"}。`,
+    `四分位区间 ${metrics.p25}~${metrics.p75}${metrics.unit || ""}${metrics.spread !== null ? `（跨度 ${metrics.spread}${metrics.unit || ""}）` : ""}。`,
+    metrics.longTail ? "存在明显长尾分段。" : "分段分布无明显长尾。"
+  ].join("");
+  return {
+    headline,
+    observation: obs,
+    possibleDrivers: [],
+    evidence: [
+      { questionIndex: question.index, label: "均值", value: metrics.mean },
+      { questionIndex: question.index, label: "中位数", value: metrics.median }
+    ],
+    implication: "",
+    confidence: "low",
+    caveat: "基础统计解读，仅描述数据表现，不代表因果结论。"
+  };
+}
+
+function ruleInterpretOpen(question, metrics) {
+  if (!metrics.available) return null;
+  const top = metrics.top;
+  if (!top) return null;
+  const headline = `开放反馈集中于「${top.name}」`;
+  const obs = [
+    `提及率最高的主题为「${top.name}」（${top.pct}%），共聚类 ${metrics.themeCount} 个主题。`,
+    metrics.nearN >= 3 ? "前 3 主题提及率均不低于 30%，需求高度集中。" : "主题分布相对分散。",
+    metrics.longTail ? `存在 ${metrics.longTail} 个低提及率主题，属长尾反馈。` : "未出现明显长尾主题。"
+  ].join("");
+  return {
+    headline,
+    observation: obs,
+    possibleDrivers: [],
+    evidence: [
+      { questionIndex: question.index, label: `${top.name}（提及率）`, value: top.pct }
+    ],
+    implication: "",
+    confidence: "low",
+    caveat: "基础统计解读，仅描述数据表现，不代表因果结论。"
+  };
+}
+
+function ruleInterpretAllocation(question, metrics) {
+  if (!metrics.available) return null;
+  const top1 = metrics.top1;
+  if (!top1) return null;
+  const headline = `分配集中于「${top1.label}」`;
+  const obs = [
+    `「${top1.label}」平均分配 ${top1.meanPoints} 分，占总分 ${metrics.top1Pct ?? Math.round((top1.meanPoints / metrics.total) * 100)}%。`,
+    `Top2 合计 ${metrics.top2Sum} 分（占比 ${metrics.top2Pct}%）。`,
+    metrics.concentrated ? "分配高度集中，头部因素主导。" : "分配相对均衡，无明显主导因素。"
+  ].join("");
+  return {
+    headline,
+    observation: obs,
+    possibleDrivers: [],
+    evidence: [
+      { questionIndex: question.index, label: `${top1.label}（平均分配）`, value: top1.meanPoints },
+      { questionIndex: question.index, label: "Top2 合计占比", value: metrics.top2Pct }
+    ],
+    implication: "",
+    confidence: "low",
+    caveat: "基础统计解读，仅描述数据表现，不代表因果结论。"
+  };
+}
+
 // 统一入口：根据题型生成基础统计解读
 export function buildRuleBasedInterpretation(question, allQuestions, context) {
   if (!question || question.dataStatus !== "complete") return null;
@@ -2967,6 +3093,11 @@ export function buildRuleBasedInterpretation(question, allQuestions, context) {
   else if (question.type === "multiple") interp = ruleInterpretMultiple(question, metrics);
   else if (question.type === "scale") interp = ruleInterpretScale(question, metrics);
   else if (question.type === "matrix") interp = ruleInterpretMatrix(question, metrics);
+  else if (question.type === "rank") interp = ruleInterpretRank(question, metrics);
+  else if (question.type === "nps") interp = ruleInterpretNps(question, metrics);
+  else if (question.type === "numeric") interp = ruleInterpretNumeric(question, metrics);
+  else if (question.type === "open") interp = ruleInterpretOpen(question, metrics);
+  else if (question.type === "allocation") interp = ruleInterpretAllocation(question, metrics);
   if (!interp) return null;
   return {
     ...interp,
@@ -3170,6 +3301,38 @@ function formatQuestionData(question, metrics) {
       ? `Top1 ${metrics.topRow.label} ${metrics.topRow.mean}；Bottom1 ${metrics.bottomRow.label} ${metrics.bottomRow.mean}；差距 ${metrics.gap}`
       : "（指标不可用）";
     return `维度：\n${rows}\n指标：${extra}`;
+  }
+  if (question.type === "rank") {
+    const items = (question.items || []).map((it) => `  - ${it.label}：平均排名 ${it.avgRank}；第一名 ${it.firstPct}%；前三 ${it.top3Pct}%；名次分布 [${(it.rankDistribution || []).join(",")}]`).join("\n");
+    const extra = metrics.available
+      ? `首选「${metrics.ranked[0]?.label || "—"}」均排 ${metrics.ranked[0]?.avgRank}；第一名比例最高「${metrics.firstLeader?.label || "—"}」${metrics.firstLeader?.firstPct}%；${metrics.stableSecondary ? `稳定次级「${metrics.stableSecondary.label}」` : "无明显稳定次级"}`
+      : "（指标不可用）";
+    return `排名结果：
+${items}
+指标：${extra}${question.unrankedPct !== null ? `；未进入前N比例 ${question.unrankedPct}%` : ""}`;
+  }
+  if (question.type === "nps") {
+    const dist = (question.distribution || []).map((v, k) => `  - ${k} 分：${v}%`).join("\n");
+    return `分布：
+${dist}
+指标：NPS ${question.nps}；推荐者 ${question.promoterPct}%；被动者 ${question.passivePct}%；贬损者 ${question.detractorPct}%；均值 ${question.mean}`;
+  }
+  if (question.type === "numeric") {
+    const seg = (question.distribution || []).map((d) => `  - ${d.label}：${d.pct}%`).join("\n");
+    return `统计量：均值 ${question.mean}${question.unit || ""}；中位数 ${question.median}${question.unit || ""}；P25 ${question.p25}；P75 ${question.p75}；范围 ${question.min}~${question.max}${question.unit || ""}
+分段分布：
+${seg || "（无分段）"}`;
+  }
+  if (question.type === "open") {
+    const themes = (question.themes || []).map((t) => `  - ${t.name}：提及率 ${t.pct}%；${t.summary || ""}${t.quotes && t.quotes.length ? `（合成原声：${t.quotes[0]}）` : ""}`).join("\n");
+    return `主题聚类：
+${themes || "（无主题）"}
+未归类：${question.otherPct}%`;
+  }
+  if (question.type === "allocation") {
+    const items = (question.items || []).map((it) => `  - ${it.label}：平均分配 ${it.meanPoints} 分（占 ${question.totalPoints ? Math.round((it.meanPoints / question.totalPoints) * 100) : 0}%）`).join("\n");
+    return `分配结果（总分 ${question.totalPoints}）：
+${items}`;
   }
   return "（未知题型）";
 }

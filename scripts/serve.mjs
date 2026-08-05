@@ -240,6 +240,52 @@ function mockInterpretation(text) {
     }).filter(Boolean);
   }
 
+  // v54：从「排名结果」段解析排序题数据
+  const rankBlock = text.match(/排名结果：\n([\s\S]*?)(?=\n指标：|$)/);
+  let rankItems = [];
+  if (rankBlock) {
+    rankItems = rankBlock[1].split("\n").map((l) => {
+      const m = l.match(/-\s*(.+?)：平均排名\s*([\d.]+)；第一名\s*([\d.]+)%；前三\s*([\d.]+)%；名次分布\s*\[([\d,]*(?:,[\d,]*)*)\]/);
+      return m ? { label: m[1].trim(), avgRank: Number(m[2]), firstPct: Number(m[3]), top3Pct: Number(m[4]), rankDistribution: m[5].split(",").map(Number) } : null;
+    }).filter(Boolean);
+  }
+
+  // v54：从「分布」段解析 NPS 分值分布（- N 分：V%）
+  const npsBlock = text.match(/分布：\n([\s\S]*?)\n指标/);
+  let npsData = [];
+  if (npsBlock) {
+    npsData = npsBlock[1].split("\n").map((l) => {
+      const m = l.match(/-\s*(\d+)\s*分：(\d+(?:\.\d+)?)%/);
+      return m ? { point: Number(m[1]), value: Number(m[2]) } : null;
+    }).filter(Boolean);
+  }
+  const npsMeta = text.match(/NPS\s*(-?[\d.]+)；推荐者\s*([\d.]+)%；被动者\s*([\d.]+)%；贬损者\s*([\d.]+)%；均值\s*([\d.]+)/);
+
+  // v54：从「统计量」段解析数值题
+  const numericMeta = text.match(/统计量：均值\s*([\d.]+)([^；]*?)；中位数\s*([\d.]+)([^；]*?)；P25\s*([\d.]+)；P75\s*([\d.]+)；范围\s*([\d.]+)~([\d.]+)/);
+
+  // v54：从「主题聚类」段解析开放题
+  const themeBlock = text.match(/主题聚类：\n([\s\S]*?)(?=\n未归类：|$)/);
+  let openThemes = [];
+  if (themeBlock) {
+    openThemes = themeBlock[1].split("\n").map((l) => {
+      const m = l.match(/-\s*(.+?)：提及率\s*([\d.]+)%/);
+      return m ? { name: m[1].trim(), pct: Number(m[2]) } : null;
+    }).filter(Boolean);
+  }
+  const otherPctMatch = text.match(/未归类：([\d.]+)%/);
+  const otherPct = otherPctMatch ? Number(otherPctMatch[1]) : null;
+
+  // v54：从「分配结果（总分 X）」段解析定和分配题
+  const allocBlock = text.match(/分配结果（总分\s*\d+）：\n([\s\S]*?)(?=\n指标|$)/);
+  let allocItems = [];
+  if (allocBlock) {
+    allocItems = allocBlock[1].split("\n").map((l) => {
+      const m = l.match(/-\s*(.+?)：平均分配\s*([\d.]+)\s*分（占\s*([\d.]+)%）/);
+      return m ? { label: m[1].trim(), meanPoints: Number(m[2]), pct: Number(m[3]) } : null;
+    }).filter(Boolean);
+  }
+
   const isMock = /本地模拟数据/.test(text);
 
   // 根据数据类型生成解读
@@ -291,6 +337,73 @@ function mockInterpretation(text) {
     ];
     evidence = sorted.slice(0, 3).map((r) => ({ questionIndex: idx, label: r.label, value: r.mean }));
     implication = `建议在正式问卷中保留「${top.label}」作为核心测量维度，并针对「${bottom.label}」设计改进方案验证题。`;
+  } else if (rankItems.length >= 2) {
+    const top = rankItems[0];
+    const top2 = rankItems[1];
+    headline = `「${top.label}」整体排序最靠前，首选优势明显`;
+    observation = `排序题结果显示，「${top.label}」平均排名 ${top.avgRank}、第一名比例 ${top.firstPct}%，是整体排序最靠前的选项；Top3 合计 ${top.top3Pct}%。名次分布 [${top.rankDistribution.join(",")}] 表明其排序${top.firstPct >= 40 ? "稳定性较强" : "存在一定波动"}。`;
+    drivers = [
+      `目标人群对「${top.label}」的偏好强度明显高于其他选项，可能与其核心使用场景中的关键诉求直接相关。`,
+      `「${top2.label}」紧随其后，说明选项间存在明确的优先级梯度。`
+    ];
+    evidence = rankItems.slice(0, 3).map((r) => ({ questionIndex: idx, label: `${r.label}（均排 ${r.avgRank}）`, value: r.firstPct }));
+    implication = `建议将「${top.label}」作为核心策略方向，Top2/Top3 选项可作为差异化卖点或备选方案进行组合。`;
+  } else if (npsData.length >= 2 && npsMeta) {
+    const nps = Number(npsMeta[1]);
+    const promoter = Number(npsMeta[2]);
+    const detractor = Number(npsMeta[4]);
+    const mean = Number(npsMeta[5]);
+    headline = `NPS ${nps}，净推荐${nps >= 0 ? "为正" : "为负"}`;
+    observation = `NPS 为 ${nps}，其中推荐者 ${promoter}%、被动者 ${npsMeta[3]}%、贬损者 ${detractor}%，均值 ${mean}。${nps >= 30 ? "整体推荐意愿较强，口碑驱动明显" : nps >= 0 ? "推荐意愿中性，存在可提升空间" : "推荐意愿偏弱，需关注贬损者的核心痛点"}。`;
+    const top2BoxPct = round1(npsData.filter((d) => d.point >= 9).reduce((s, d) => s + d.value, 0));
+    drivers = [
+      `推荐者与贬损者占比的差距可能与 NPS 水平直接相关，高分段（9-10 分）占比 ${top2BoxPct}% 是推荐意愿的主要来源。`,
+      `低分段（0-6 分）人群的负面体验可能集中于服务响应与价格感知。`
+    ];
+    evidence = [
+      { questionIndex: idx, label: "NPS", value: nps },
+      { questionIndex: idx, label: "推荐者", value: promoter },
+      { questionIndex: idx, label: "贬损者", value: detractor }
+    ];
+    implication = `建议针对贬损者反馈的核心痛点制定改进计划，并通过推荐者画像放大口碑传播路径。`;
+  } else if (numericMeta) {
+    const mean = numericMeta[1];
+    const unit = numericMeta[2].trim();
+    const median = numericMeta[3];
+    headline = `均值 ${mean}${unit}，分布${Number(mean) > Number(median) * 1.1 ? "右偏" : "较均衡"}`;
+    observation = `数值题统计显示，均值 ${mean}${unit}、中位数 ${median}${unit}，P25 ${numericMeta[5]}、P75 ${numericMeta[6]}，范围 ${numericMeta[7]}~${numericMeta[8]}${numericMeta[4].trim()}。${Number(mean) > Number(median) * 1.1 ? "均值明显高于中位数，少数高值拉高了整体水平" : "均值与中位数接近，分布较为均衡"}。`;
+    drivers = [
+      `均值与中位数的差异反映了高值人群的存在，可能对应高消费力或深度使用人群。`,
+      `P25-P75 区间${Number(numericMeta[6]) - Number(numericMeta[5]) > Number(mean) ? "较宽，人群分化明显" : "相对集中，一致性较好"}。`
+    ];
+    evidence = [
+      { questionIndex: idx, label: "均值", value: `${mean}${unit}` },
+      { questionIndex: idx, label: "中位数", value: `${median}${unit}` }
+    ];
+    implication = `可将中位数 ${median}${unit} 作为典型用户基准值，针对高值人群与中低值人群分别设计运营策略。`;
+  } else if (openThemes.length >= 2) {
+    const top = openThemes[0];
+    const second = openThemes[1];
+    headline = `开放反馈集中于「${top.name}」（${top.pct}%）`;
+    observation = `开放题主题聚类显示，「${top.name}」提及率 ${top.pct}% 最高，其次「${second.name}」${second.pct}%，${otherPct !== null ? `另有 ${otherPct}% 未归入主要主题` : "主题覆盖了用户的核心关注点"}。`;
+    drivers = [
+      `「${top.name}」的高提及率表明该主题是用户最主动表达的关注点，可能与实际使用痛点直接相关。`,
+      `主题聚类结果可作为开放式探索的收敛结论，为后续定量验证提供假设。`
+    ];
+    evidence = openThemes.slice(0, 3).map((t) => ({ questionIndex: idx, label: t.name, value: t.pct }));
+    implication = `建议围绕「${top.name}」设计专项验证题，并将次要主题作为长尾需求持续跟踪。`;
+  } else if (allocItems.length >= 2) {
+    const top = allocItems[0];
+    const second = allocItems[1];
+    const top2Pct = round1(top.pct + second.pct);
+    headline = `分配集中于「${top.label}」（${top.pct}%）`;
+    observation = `定和分配结果显示，「${top.label}」平均分配 ${top.meanPoints} 分（占总分 ${top.pct}%），是受访者最愿意投入的方向；Top2 合计 ${top2Pct}%，优先级梯度清晰。`;
+    drivers = [
+      `「${top.label}」获得最高分配权重，说明用户对该方向的资源投入意愿最强。`,
+      `Top2 合计 ${top2Pct}% 表明资源分配存在明确聚焦，长尾方向投入较低。`
+    ];
+    evidence = allocItems.slice(0, 3).map((it) => ({ questionIndex: idx, label: it.label, value: `${it.meanPoints} 分` }));
+    implication = `建议资源投入优先匹配「${top.label}」的分配权重，作为预算与优先级决策的量化依据。`;
   } else {
     headline = "数据分布显示主流选择集中";
     observation = "当前题目数据已完整生成，分布符合预期，可用于后续分析。";

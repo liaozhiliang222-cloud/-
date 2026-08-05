@@ -56,7 +56,7 @@ import {
   migrateQuestionData,
   optionsList,
   buildQuestionPromptFragment
-} from "./quant-core.js?v=55";
+} from "./quant-core.js?v=56";
 
 import {
   parseQuestionnaireText,
@@ -72,7 +72,7 @@ import {
   analyzeQuestionIssues,
   buildImportSummary,
   confirmImportQuestions
-} from "./import-core.js?v=53";
+} from "./import-core.js?v=56";
 
 import {
   QUOTA_TEMPLATES,
@@ -92,7 +92,7 @@ import {
   buildQuotaPromptText,
   buildQuotaSummaryLines,
   quotaStats
-} from "./quota-core.js?v=53";
+} from "./quota-core.js?v=56";
 
 const MODEL_CONFIG = {
   kimi: { name: "Kimi", key: "synthuser_api_key_kimi", placeholder: "sk-...", model: "moonshot-v1-8k", baseUrl: "https://api.moonshot.cn/v1/chat/completions" },
